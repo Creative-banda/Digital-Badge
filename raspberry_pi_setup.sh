@@ -33,23 +33,23 @@ python3 -m venv face_env
 source face_env/bin/activate
 
 # Upgrade pip
-pip install --upgrade pip setuptools wheel
+pip install --upgrade pip setuptools wheel --break-system-packages
 
 # Install packages one by one for better error handling
 echo "Installing numpy..."
-pip install numpy
+pip install numpy --break-system-packages
 
 echo "Installing Pillow..."
-pip install Pillow
+pip install Pillow --break-system-packages
 
 echo "Installing OpenCV..."
-pip install opencv-python
+pip install opencv-python --break-system-packages
 
 echo "Installing dlib (this may take 15-20 minutes)..."
-pip install dlib
+pip install dlib --break-system-packages
 
 echo "Installing face-recognition..."
-pip install face-recognition
+pip install face-recognition --break-system-packages
 
 echo "Setup complete!"
 echo "To activate environment: source face_env/bin/activate"
