@@ -295,8 +295,10 @@ class FaceBadgeSystem:
         
         idle_frame_idx = 0
         scan_frame_idx = 0
-        idle_delay = 0.1  # Slower playback for calm idle
-        scan_delay = 0.05  # Faster playback for active scan
+        idle_delay = 0.03  # Fast animation playback
+        scan_delay = 0.02  # Even faster for scan
+        detect_every_n_frames = 3  # Only detect faces every 3rd frame for speed
+        frame_counter = 0
         
         while self.running:
             # Reset detection state
@@ -311,20 +313,21 @@ class FaceBadgeSystem:
                     self.disp.ShowImage(self.idle_frames[idle_frame_idx].rotate(180))
                     idle_frame_idx = (idle_frame_idx + 1) % len(self.idle_frames)
                 
-                # Check for face
-                ret, frame = self.cap.read()
-                if not ret:
-                    time.sleep(idle_delay)
-                    continue
+                frame_counter += 1
                 
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                face_locations = face_recognition.face_locations(rgb_frame)
-                
-                if face_locations and len(self.known_face_encodings) > 0:
-                    # Face detected! Switch to SCAN state
-                    self.current_state = "scan"
-                    scan_frame_idx = 0
-                    break
+                # Only check for face every N frames to keep animation smooth
+                if frame_counter % detect_every_n_frames == 0:
+                    ret, frame = self.cap.read()
+                    if ret:
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        face_locations = face_recognition.face_locations(rgb_frame)
+                        
+                        if face_locations and len(self.known_face_encodings) > 0:
+                            # Face detected! Switch to SCAN state
+                            self.current_state = "scan"
+                            scan_frame_idx = 0
+                            frame_counter = 0
+                            break
                 
                 time.sleep(idle_delay)
             
@@ -335,60 +338,65 @@ class FaceBadgeSystem:
                     self.disp.ShowImage(self.scan_frames[scan_frame_idx].rotate(180))
                     scan_frame_idx = (scan_frame_idx + 1) % len(self.scan_frames)
                 
-                # Continue face recognition
-                ret, frame = self.cap.read()
-                if not ret:
-                    time.sleep(scan_delay)
-                    continue
+                frame_counter += 1
                 
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                face_locations = face_recognition.face_locations(rgb_frame)
-                
-                if not face_locations:
-                    # Face lost, back to idle
-                    self.detection_frames = 0
-                    self.last_detected_name = None
-                    break
-                
-                # Encode and match faces
-                face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-                
-                face_detected = False
-                detected_name = None
-                
-                for face_encoding in face_encodings:
-                    matches = face_recognition.compare_faces(
-                        self.known_face_encodings,
-                        face_encoding,
-                        tolerance=0.6
-                    )
+                # Check face recognition every N frames
+                if frame_counter % detect_every_n_frames == 0:
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        time.sleep(scan_delay)
+                        continue
                     
-                    if True in matches:
-                        match_index = matches.index(True)
-                        detected_name = self.known_face_names[match_index]
-                        face_detected = True
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    face_locations = face_recognition.face_locations(rgb_frame)
+                    
+                    if not face_locations:
+                        # Face lost, back to idle
+                        self.detection_frames = 0
+                        self.last_detected_name = None
+                        frame_counter = 0
                         break
-                
-                if face_detected:
-                    if detected_name == self.last_detected_name:
-                        self.detection_frames += 1
+                    
+                    # Encode and match faces
+                    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                    
+                    face_detected = False
+                    detected_name = None
+                    
+                    for face_encoding in face_encodings:
+                        matches = face_recognition.compare_faces(
+                            self.known_face_encodings,
+                            face_encoding,
+                            tolerance=0.6
+                        )
+                        
+                        if True in matches:
+                            match_index = matches.index(True)
+                            detected_name = self.known_face_names[match_index]
+                            face_detected = True
+                            break
+                    
+                    if face_detected:
+                        if detected_name == self.last_detected_name:
+                            self.detection_frames += 1
+                        else:
+                            self.detection_frames = 1
+                            self.last_detected_name = detected_name
+                        
+                        # Stable recognition achieved!
+                        if self.detection_frames >= self.frames_required:
+                            logging.info(f"Face recognized: {detected_name}")
+                            
+                            # Immediately show badge (no scan fade-out)
+                            self.show_badge(detected_name)
+                            
+                            # Badge done, break to restart idle
+                            frame_counter = 0
+                            break
                     else:
-                        self.detection_frames = 1
-                        self.last_detected_name = detected_name
-                    
-                    # Stable recognition achieved!
-                    if self.detection_frames >= self.frames_required:
-                        logging.info(f"Face recognized: {detected_name}")
-                        
-                        # Immediately show badge (no scan fade-out)
-                        self.show_badge(detected_name)
-                        
-                        # Badge done, break to restart idle
-                        break
-                else:
-                    # Face present but not recognized, keep scanning
-                    self.detection_frames = 0
-                    self.last_detected_name = None
+                        # Face present but not recognized, keep scanning
+                        self.detection_frames = 0
+                        self.last_detected_name = None
                 
                 time.sleep(scan_delay)
         
