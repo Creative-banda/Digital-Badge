@@ -332,6 +332,8 @@ class FaceBadgeSystem:
                 time.sleep(idle_delay)
             
             # SCAN STATE: Play scan animation while recognizing
+            recognized_user = None
+            
             while self.running and self.current_state == "scan":
                 # Show next scan frame if available
                 if self.scan_frames:
@@ -351,52 +353,56 @@ class FaceBadgeSystem:
                     face_locations = face_recognition.face_locations(rgb_frame)
                     
                     if not face_locations:
-                        # Face lost, back to idle
-                        self.detection_frames = 0
-                        self.last_detected_name = None
-                        frame_counter = 0
-                        break
-                    
-                    # Encode and match faces
-                    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-                    
-                    face_detected = False
-                    detected_name = None
-                    
-                    for face_encoding in face_encodings:
-                        matches = face_recognition.compare_faces(
-                            self.known_face_encodings,
-                            face_encoding,
-                            tolerance=0.6
-                        )
-                        
-                        if True in matches:
-                            match_index = matches.index(True)
-                            detected_name = self.known_face_names[match_index]
-                            face_detected = True
-                            break
-                    
-                    if face_detected:
-                        if detected_name == self.last_detected_name:
-                            self.detection_frames += 1
-                        else:
-                            self.detection_frames = 1
-                            self.last_detected_name = detected_name
-                        
-                        # Stable recognition achieved!
-                        if self.detection_frames >= self.frames_required:
-                            logging.info(f"Face recognized: {detected_name}")
-                            
-                            # Immediately show badge (no scan fade-out)
-                            self.show_badge(detected_name)
-                            
-                            # Badge done, break to restart idle
+                        # Face lost, only break if we haven't recognized anyone yet
+                        if recognized_user is None:
+                            self.detection_frames = 0
+                            self.last_detected_name = None
                             frame_counter = 0
                             break
                     else:
-                        # Face present but not recognized, keep scanning
-                        self.detection_frames = 0
-                        self.last_detected_name = None
+                        # Encode and match faces
+                        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                        
+                        face_detected = False
+                        detected_name = None
+                        
+                        for face_encoding in face_encodings:
+                            matches = face_recognition.compare_faces(
+                                self.known_face_encodings,
+                                face_encoding,
+                                tolerance=0.6
+                            )
+                            
+                            if True in matches:
+                                match_index = matches.index(True)
+                                detected_name = self.known_face_names[match_index]
+                                face_detected = True
+                                break
+                        
+                        if face_detected:
+                            if detected_name == self.last_detected_name:
+                                self.detection_frames += 1
+                            else:
+                                self.detection_frames = 1
+                                self.last_detected_name = detected_name
+                            
+                            # Stable recognition achieved!
+                            if self.detection_frames >= self.frames_required and recognized_user is None:
+                                logging.info(f"Face recognized: {detected_name}")
+                                recognized_user = detected_name
+                                # Continue playing animation, don't break yet
+                        else:
+                            # Face present but not recognized
+                            if recognized_user is None:
+                                self.detection_frames = 0
+                                self.last_detected_name = None
+                
+                # Check if scan animation completed one full loop after recognition
+                if recognized_user is not None and scan_frame_idx == 0 and frame_counter > detect_every_n_frames:
+                    # Scan animation loop complete, show badge
+                    self.show_badge(recognized_user)
+                    frame_counter = 0
+                    break
                 
                 time.sleep(scan_delay)
         
