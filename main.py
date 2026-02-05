@@ -8,7 +8,6 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageEnhance, ImageFont
 import numpy as np
 import os
 import time
-import threading
 import glob
 import logging
 
@@ -33,6 +32,10 @@ class FaceBadgeSystem:
         self.disp.clear()
         self.disp.bl_DutyCycle(50)
         
+        # Load animation frames
+        self.idle_frames = self.load_animation_frames("animations/idle")
+        self.scan_frames = self.load_animation_frames("animations/scan")
+        
         # Store multiple known faces and their data
         self.known_face_encodings = []
         self.known_face_names = []
@@ -49,21 +52,39 @@ class FaceBadgeSystem:
         else:
             logging.info("Camera initialized successfully")
         
-        # Camera state
-        self.camera_active = False
-        
         # UI state
         self.current_state = "idle"
-        self.recognized_user = None
         self.running = True
         
         # Detection stability - require multiple consecutive frames
         self.detection_frames = 0
-        self.frames_required = 3  # Require 3 consecutive frames with same face
+        self.frames_required = 3
         self.last_detected_name = None
+    
+    def load_animation_frames(self, folder_path):
+        """Load and resize animation frames from folder"""
+        if not os.path.exists(folder_path):
+            logging.warning(f"Animation folder not found: {folder_path}")
+            return []
         
-        # Load idle screen
-        self.show_idle_screen()
+        # Get all jpg files sorted
+        frame_files = sorted(glob.glob(os.path.join(folder_path, "*.jpg")))
+        if not frame_files:
+            logging.warning(f"No frames found in {folder_path}")
+            return []
+        
+        frames = []
+        for frame_file in frame_files:
+            try:
+                img = Image.open(frame_file).convert("RGB")
+                # Resize from 500x500 to 240x240
+                img = img.resize((LCD_SIZE, LCD_SIZE), Image.LANCZOS)
+                frames.append(img)
+            except Exception as e:
+                logging.error(f"Failed to load frame {frame_file}: {e}")
+        
+        logging.info(f"Loaded {len(frames)} frames from {folder_path}")
+        return frames
     
     def load_known_faces(self):
         """Load and encode all known faces from known_faces folder"""
@@ -265,12 +286,17 @@ class FaceBadgeSystem:
         self.current_state = "idle"
     
     def detect_and_show_badge(self):
-        """Main loop: detect face -> show badge -> repeat"""
+        """Main loop: idle animation -> detect face -> scan animation -> show badge -> repeat"""
         if not self.cap or not self.cap.isOpened():
             logging.error("Camera not available")
             return
         
         logging.info("Starting face detection...")
+        
+        idle_frame_idx = 0
+        scan_frame_idx = 0
+        idle_delay = 0.1  # Slower playback for calm idle
+        scan_delay = 0.05  # Faster playback for active scan
         
         while self.running:
             # Reset detection state
@@ -278,65 +304,93 @@ class FaceBadgeSystem:
             self.last_detected_name = None
             self.current_state = "idle"
             
-            # Keep detecting until we get a stable match
+            # IDLE STATE: Play idle animation while waiting for face
             while self.running:
+                # Show next idle frame if available
+                if self.idle_frames:
+                    self.disp.ShowImage(self.idle_frames[idle_frame_idx].rotate(180))
+                    idle_frame_idx = (idle_frame_idx + 1) % len(self.idle_frames)
+                
+                # Check for face
                 ret, frame = self.cap.read()
                 if not ret:
-                    logging.warning("Failed to read frame")
+                    time.sleep(idle_delay)
                     continue
                 
-                # Convert BGR to RGB
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
-                # Find faces in frame
                 face_locations = face_recognition.face_locations(rgb_frame)
                 
                 if face_locations and len(self.known_face_encodings) > 0:
-                    # Encode faces
-                    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-                    
-                    face_detected = False
-                    detected_name = None
-                    
-                    for face_encoding in face_encodings:
-                        # Compare with all known faces
-                        matches = face_recognition.compare_faces(
-                            self.known_face_encodings, 
-                            face_encoding, 
-                            tolerance=0.6
-                        )
-                        
-                        if True in matches:
-                            match_index = matches.index(True)
-                            detected_name = self.known_face_names[match_index]
-                            face_detected = True
-                            break
-                    
-                    if face_detected:
-                        # Check if same person as last frame
-                        if detected_name == self.last_detected_name:
-                            self.detection_frames += 1
-                        else:
-                            self.detection_frames = 1
-                            self.last_detected_name = detected_name
-                        
-                        # Got stable detection!
-                        if self.detection_frames >= self.frames_required:
-                            logging.info(f"Face detected: {detected_name}")
-                            
-                            # Show badge immediately (blocking - no threading!)
-                            self.show_badge(detected_name)
-                            
-                            # Badge is done, break inner loop to start fresh detection
-                            break
-                    else:
-                        # No face or no match, reset counter
-                        self.detection_frames = 0
-                        self.last_detected_name = None
-                else:
-                    # No face in frame, reset counter
+                    # Face detected! Switch to SCAN state
+                    self.current_state = "scan"
+                    scan_frame_idx = 0
+                    break
+                
+                time.sleep(idle_delay)
+            
+            # SCAN STATE: Play scan animation while recognizing
+            while self.running and self.current_state == "scan":
+                # Show next scan frame if available
+                if self.scan_frames:
+                    self.disp.ShowImage(self.scan_frames[scan_frame_idx].rotate(180))
+                    scan_frame_idx = (scan_frame_idx + 1) % len(self.scan_frames)
+                
+                # Continue face recognition
+                ret, frame = self.cap.read()
+                if not ret:
+                    time.sleep(scan_delay)
+                    continue
+                
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                face_locations = face_recognition.face_locations(rgb_frame)
+                
+                if not face_locations:
+                    # Face lost, back to idle
                     self.detection_frames = 0
                     self.last_detected_name = None
+                    break
+                
+                # Encode and match faces
+                face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                
+                face_detected = False
+                detected_name = None
+                
+                for face_encoding in face_encodings:
+                    matches = face_recognition.compare_faces(
+                        self.known_face_encodings,
+                        face_encoding,
+                        tolerance=0.6
+                    )
+                    
+                    if True in matches:
+                        match_index = matches.index(True)
+                        detected_name = self.known_face_names[match_index]
+                        face_detected = True
+                        break
+                
+                if face_detected:
+                    if detected_name == self.last_detected_name:
+                        self.detection_frames += 1
+                    else:
+                        self.detection_frames = 1
+                        self.last_detected_name = detected_name
+                    
+                    # Stable recognition achieved!
+                    if self.detection_frames >= self.frames_required:
+                        logging.info(f"Face recognized: {detected_name}")
+                        
+                        # Immediately show badge (no scan fade-out)
+                        self.show_badge(detected_name)
+                        
+                        # Badge done, break to restart idle
+                        break
+                else:
+                    # Face present but not recognized, keep scanning
+                    self.detection_frames = 0
+                    self.last_detected_name = None
+                
+                time.sleep(scan_delay)
         
         logging.info("Detection stopped")
     
@@ -361,13 +415,20 @@ class FaceBadgeSystem:
         # Fade out badge
         self.fade_image(badge_img, fade_in=False)
         
-        # Show idle screen
-        self.show_idle_screen()
-        
-        # Small pause before next detection
+        # Small pause before returning to idle animation
         time.sleep(0.5)
         
-        logging.info("Badge display complete, ready for next detection")
+        logging.info("Badge display complete, returning to idle")
+    
+    def show_idle_screen(self):
+        """Display first idle frame (used as fallback)"""
+        if self.idle_frames:
+            self.disp.ShowImage(self.idle_frames[0].rotate(180))
+        else:
+            # Fallback to black screen if no animation
+            idle_img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
+            self.disp.ShowImage(idle_img.rotate(180))
+        self.current_state = "idle"
     
     def cleanup(self):
         """Clean up resources"""
