@@ -7,6 +7,7 @@ import numpy as np
 import os
 import time
 import threading
+import glob
 
 class FaceBadgeSystem:
     def __init__(self):
@@ -23,10 +24,11 @@ class FaceBadgeSystem:
         self.canvas = Canvas(self.root, width=self.screen_width, height=self.screen_height, bg='black', highlightthickness=0)
         self.canvas.pack()
         
-        # Load known face encoding
-        self.known_face_encoding = None
-        self.user_name = "John Doe"  # Default user name
-        self.load_known_face()
+        # Store multiple known faces and their data
+        self.known_face_encodings = []
+        self.known_face_names = []
+        self.avatar_paths = {}
+        self.load_known_faces()
         
         # Camera setup
         self.cap = None
@@ -34,6 +36,7 @@ class FaceBadgeSystem:
         
         # UI state
         self.current_state = "idle"
+        self.recognized_user = None
         
         # Load idle screen
         self.load_idle_screen()
@@ -43,20 +46,77 @@ class FaceBadgeSystem:
         
         # Bind escape key to exit
         self.root.bind('<Escape>', lambda e: self.root.quit())
+    
+    def load_known_faces(self):
+        """Load and encode all known faces from known_faces folder"""
+        known_faces_dir = "known_faces"
         
-    def load_known_face(self):
-        """Load and encode the known face from known_faces/user.jpg"""
-        known_face_path = "known_faces/user.jpg"
-        if os.path.exists(known_face_path):
-            known_image = face_recognition.load_image_file(known_face_path)
-            encodings = face_recognition.face_encodings(known_image)
-            if encodings:
-                self.known_face_encoding = encodings[0]
-                print("Known face loaded successfully")
-            else:
-                print("No face found in reference image")
-        else:
-            print("Reference image not found")
+        if not os.path.exists(known_faces_dir):
+            print(f"Warning: {known_faces_dir} directory not found")
+            return
+        
+        # Supported image extensions
+        extensions = ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']
+        face_files = []
+        
+        # Get all image files
+        for ext in extensions:
+            face_files.extend(glob.glob(os.path.join(known_faces_dir, ext)))
+        
+        if not face_files:
+            print(f"No face images found in {known_faces_dir}")
+            return
+        
+        print(f"Loading {len(face_files)} face(s) from {known_faces_dir}...")
+        
+        for face_file in face_files:
+            try:
+                # Extract username from filename (without extension)
+                filename = os.path.basename(face_file)
+                username = os.path.splitext(filename)[0]
+                
+                # Load and encode the face
+                image = face_recognition.load_image_file(face_file)
+                encodings = face_recognition.face_encodings(image)
+                
+                if encodings:
+                    self.known_face_encodings.append(encodings[0])
+                    self.known_face_names.append(username)
+                    
+                    # Find matching avatar
+                    avatar_path = self.find_avatar(username)
+                    if avatar_path:
+                        self.avatar_paths[username] = avatar_path
+                        print(f"✓ Loaded: {username} (with avatar)")
+                    else:
+                        print(f"✓ Loaded: {username} (no avatar found)")
+                else:
+                    print(f"✗ No face detected in {filename}")
+                    
+            except Exception as e:
+                print(f"✗ Error loading {face_file}: {str(e)}")
+        
+        print(f"\nTotal faces loaded: {len(self.known_face_names)}")
+        if self.known_face_names:
+            print(f"Recognized users: {', '.join(self.known_face_names)}")
+    
+    def find_avatar(self, username):
+        """Find avatar image for a given username"""
+        avatars_dir = "avatars"
+        
+        if not os.path.exists(avatars_dir):
+            return None
+        
+        # Look for avatar with pattern: username_avatar.ext
+        avatar_pattern = f"{username}_avatar"
+        extensions = ['jpg', 'jpeg', 'png', 'JPG', 'JPEG', 'PNG']
+        
+        for ext in extensions:
+            avatar_path = os.path.join(avatars_dir, f"{avatar_pattern}.{ext}")
+            if os.path.exists(avatar_path):
+                return avatar_path
+        
+        return None
     
     def load_idle_screen(self):
         """Load and display idle screen"""
@@ -106,20 +166,25 @@ class FaceBadgeSystem:
                 # Find faces in frame
                 face_locations = face_recognition.face_locations(rgb_frame)
                 
-                if face_locations:
+                if face_locations and len(self.known_face_encodings) > 0:
                     # Encode faces
                     face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
                     
                     for face_encoding in face_encodings:
-                        if self.known_face_encoding is not None:
-                            # Compare with known face
-                            matches = face_recognition.compare_faces([self.known_face_encoding], face_encoding, tolerance=0.6)
+                        # Compare with all known faces
+                        matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.6)
+                        
+                        # Check if any match found
+                        if True in matches:
+                            # Get the index of first match
+                            match_index = matches.index(True)
+                            recognized_name = self.known_face_names[match_index]
                             
-                            if matches[0]:
-                                # Face recognized - stop camera and show badge
-                                self.camera_active = False
-                                self.root.after(0, self.show_badge)
-                                break
+                            # Face recognized - stop camera and show badge
+                            self.recognized_user = recognized_name
+                            self.camera_active = False
+                            self.root.after(0, self.show_badge)
+                            break
             
             time.sleep(0.1)  # Small delay to prevent excessive CPU usage
         
@@ -131,9 +196,18 @@ class FaceBadgeSystem:
         self.canvas.delete("all")
         self.current_state = "badge"
         
-        # Load avatar image
-        avatar_path = "avatars/user_avatar.png"
-        if os.path.exists(avatar_path):
+        if not self.recognized_user:
+            print("Error: No recognized user")
+            self.reset_to_idle()
+            return
+        
+        username = self.recognized_user
+        print(f"Showing badge for: {username}")
+        
+        # Check if avatar exists for this user
+        avatar_path = self.avatar_paths.get(username)
+        
+        if avatar_path and os.path.exists(avatar_path):
             # Load and process avatar
             avatar_img = Image.open(avatar_path)
             avatar_size = 200
@@ -160,11 +234,17 @@ class FaceBadgeSystem:
             avatar_y = self.screen_height // 2 - 50
             self.canvas.create_oval(avatar_x - 100, avatar_y - 100, avatar_x + 100, avatar_y + 100, 
                                   fill="gray", outline="white", width=3)
+            # Add initial letter
+            initial = username[0].upper() if username else "?"
+            self.canvas.create_text(avatar_x, avatar_y, 
+                                  text=initial, 
+                                  fill="white", font=("Arial", 60, "bold"))
         
-        # Display user name
+        # Display user name (capitalize first letter of each word)
+        display_name = username.replace('_', ' ').title()
         name_y = self.screen_height // 2 + 120
         self.canvas.create_text(self.screen_width // 2, name_y, 
-                              text=self.user_name, 
+                              text=display_name, 
                               fill="white", font=("Arial", 32, "bold"))
         
         # Display welcome message
