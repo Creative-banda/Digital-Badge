@@ -336,8 +336,16 @@ class FaceBadgeSystem:
                             self.last_recognition_time = current_time
                             self.detection_frames = 0
                             self.last_detected_name = None
+                            
+                            # STOP the camera loop completely
                             self.camera_active = False
+                            
+                            # Show badge in THIS thread (blocking)
                             self.show_badge()
+                            
+                            # After badge is done, this loop will exit
+                            # and reset_to_idle() will start a new camera thread
+                            break
                     else:
                         # No face detected, reset counter
                         self.detection_frames = 0
