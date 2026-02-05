@@ -1,28 +1,32 @@
+#!/usr/bin/python3
+# -*- coding: UTF-8 -*-
+
+import sys
 import cv2
 import face_recognition
-import tkinter as tk
-from tkinter import Canvas
-from PIL import Image, ImageTk, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageEnhance, ImageFont
 import numpy as np
 import os
 import time
 import threading
 import glob
+import logging
+
+sys.path.append("..")
+from lib import LCD_1inch28
+
+logging.basicConfig(level=logging.INFO)
+
+LCD_SIZE = 240
+
 
 class FaceBadgeSystem:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("Face Badge System")
-        self.root.attributes('-fullscreen', True)
-        self.root.configure(bg='black')
-        
-        # Get screen dimensions
-        self.screen_width = self.root.winfo_screenwidth()
-        self.screen_height = self.root.winfo_screenheight()
-        
-        # Canvas for display
-        self.canvas = Canvas(self.root, width=self.screen_width, height=self.screen_height, bg='black', highlightthickness=0)
-        self.canvas.pack()
+        # Initialize LCD display
+        self.disp = LCD_1inch28.LCD_1inch28()
+        self.disp.Init()
+        self.disp.clear()
+        self.disp.bl_DutyCycle(50)
         
         # Store multiple known faces and their data
         self.known_face_encodings = []
@@ -37,22 +41,17 @@ class FaceBadgeSystem:
         # UI state
         self.current_state = "idle"
         self.recognized_user = None
+        self.running = True
         
         # Load idle screen
-        self.load_idle_screen()
-        
-        # Start camera thread
-        self.start_camera_thread()
-        
-        # Bind escape key to exit
-        self.root.bind('<Escape>', lambda e: self.root.quit())
+        self.show_idle_screen()
     
     def load_known_faces(self):
         """Load and encode all known faces from known_faces folder"""
         known_faces_dir = "known_faces"
         
         if not os.path.exists(known_faces_dir):
-            print(f"Warning: {known_faces_dir} directory not found")
+            logging.warning(f"{known_faces_dir} directory not found")
             return
         
         # Supported image extensions
@@ -64,10 +63,10 @@ class FaceBadgeSystem:
             face_files.extend(glob.glob(os.path.join(known_faces_dir, ext)))
         
         if not face_files:
-            print(f"No face images found in {known_faces_dir}")
+            logging.warning(f"No face images found in {known_faces_dir}")
             return
         
-        print(f"Loading {len(face_files)} face(s) from {known_faces_dir}...")
+        logging.info(f"Loading {len(face_files)} face(s) from {known_faces_dir}...")
         
         for face_file in face_files:
             try:
@@ -87,18 +86,18 @@ class FaceBadgeSystem:
                     avatar_path = self.find_avatar(username)
                     if avatar_path:
                         self.avatar_paths[username] = avatar_path
-                        print(f"✓ Loaded: {username} (with avatar)")
+                        logging.info(f"✓ Loaded: {username} (with avatar)")
                     else:
-                        print(f"✓ Loaded: {username} (no avatar found)")
+                        logging.info(f"✓ Loaded: {username} (no avatar found)")
                 else:
-                    print(f"✗ No face detected in {filename}")
+                    logging.warning(f"✗ No face detected in {filename}")
                     
             except Exception as e:
-                print(f"✗ Error loading {face_file}: {str(e)}")
+                logging.error(f"✗ Error loading {face_file}: {str(e)}")
         
-        print(f"\nTotal faces loaded: {len(self.known_face_names)}")
+        logging.info(f"Total faces loaded: {len(self.known_face_names)}")
         if self.known_face_names:
-            print(f"Recognized users: {', '.join(self.known_face_names)}")
+            logging.info(f"Recognized users: {', '.join(self.known_face_names)}")
     
     def find_avatar(self, username):
         """Find avatar image for a given username"""
@@ -118,43 +117,145 @@ class FaceBadgeSystem:
         
         return None
     
-    def load_idle_screen(self):
-        """Load and display idle screen"""
-        idle_path = "ui/idle.png"
-        if os.path.exists(idle_path):
-            idle_img = Image.open(idle_path)
-            idle_img = idle_img.resize((self.screen_width, self.screen_height), Image.Resampling.LANCZOS)
-            self.idle_photo = ImageTk.PhotoImage(idle_img)
-            self.show_idle_screen()
+    def fade_image(self, img, fade_in=True, steps=20, delay=0.02):
+        """Fade in/out an image on the LCD display"""
+        black = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
+        
+        for i in range(steps + 1):
+            alpha = i / steps if fade_in else 1 - (i / steps)
+            frame = Image.blend(black, img, alpha)
+            self.disp.ShowImage(frame.rotate(180))
+            time.sleep(delay)
+    
+    def create_text_screen(self, text, font_size=24):
+        """Create an image with centered text"""
+        img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        try:
+            font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                font_size
+            )
+        except:
+            # Fallback to default font if system font not available
+            font = ImageFont.load_default()
+        
+        # Handle multi-line text
+        lines = text.split('\n')
+        y_offset = LCD_SIZE // 2 - (len(lines) * font_size) // 2
+        
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            x = (LCD_SIZE - tw) // 2
+            draw.text((x, y_offset), line, fill=(255, 255, 255), font=font)
+            y_offset += font_size + 5
+        
+        return img
+    
+    def create_badge_screen(self, username, avatar_path=None):
+        """Create badge screen with avatar and name"""
+        img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        if avatar_path and os.path.exists(avatar_path):
+            # Use avatar image
+            avatar_img = Image.open(avatar_path).convert("RGB")
+            
+            # Crop to square
+            w, h = avatar_img.size
+            s = min(w, h)
+            avatar_img = avatar_img.crop(((w - s)//2, (h - s)//2, (w + s)//2, (h + s)//2))
+            
+            # Resize
+            avatar_size = 140
+            avatar_img = avatar_img.resize((avatar_size, avatar_size), Image.LANCZOS)
+            
+            # Create circular mask
+            mask = Image.new('L', (avatar_size, avatar_size), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
+            
+            # Apply mask
+            avatar_img.putalpha(mask)
+            
+            # Paste avatar
+            pos = ((LCD_SIZE - avatar_size) // 2, 30)
+            img.paste(avatar_img, pos, avatar_img)
         else:
-            # Create simple idle screen if image doesn't exist
-            self.canvas.delete("all")
-            self.canvas.create_text(self.screen_width//2, self.screen_height//2, 
-                                  text="Face Recognition System\nReady", 
-                                  fill="white", font=("Arial", 24), justify="center")
+            # Create placeholder circle with initial
+            avatar_size = 140
+            x = LCD_SIZE // 2
+            y = 100
+            draw.ellipse(
+                (x - avatar_size//2, y - avatar_size//2, 
+                 x + avatar_size//2, y + avatar_size//2),
+                fill=(60, 60, 60), outline=(255, 255, 255), width=3
+            )
+            
+            # Draw initial
+            initial = username[0].upper() if username else "?"
+            try:
+                font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                    60
+                )
+            except:
+                font = ImageFont.load_default()
+            
+            bbox = draw.textbbox((0, 0), initial, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+            draw.text((x - tw//2, y - th//2), initial, fill=(255, 255, 255), font=font)
+        
+        # Draw username
+        display_name = username.replace('_', ' ').title()
+        try:
+            name_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                20
+            )
+        except:
+            name_font = ImageFont.load_default()
+        
+        bbox = draw.textbbox((0, 0), display_name, font=name_font)
+        tw = bbox[2] - bbox[0]
+        draw.text(((LCD_SIZE - tw) // 2, 185), display_name, fill=(255, 255, 255), font=name_font)
+        
+        # Draw "Welcome" text
+        try:
+            welcome_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                16
+            )
+        except:
+            welcome_font = ImageFont.load_default()
+        
+        welcome_text = "Welcome!"
+        bbox = draw.textbbox((0, 0), welcome_text, font=welcome_font)
+        tw = bbox[2] - bbox[0]
+        draw.text(((LCD_SIZE - tw) // 2, 210), welcome_text, fill=(100, 255, 100), font=welcome_font)
+        
+        return img
     
     def show_idle_screen(self):
         """Display idle screen"""
-        self.canvas.delete("all")
-        if hasattr(self, 'idle_photo'):
-            self.canvas.create_image(self.screen_width//2, self.screen_height//2, image=self.idle_photo)
+        idle_img = self.create_text_screen("Face Badge\nSystem\nReady", font_size=24)
+        self.disp.ShowImage(idle_img.rotate(180))
         self.current_state = "idle"
-    
-    def start_camera_thread(self):
-        """Start camera in separate thread"""
-        camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
-        camera_thread.start()
     
     def camera_loop(self):
         """Main camera processing loop"""
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
-            print("Cannot open camera")
+            logging.error("Cannot open camera")
             return
         
         self.camera_active = True
+        logging.info("Camera started, waiting for faces...")
         
-        while self.camera_active:
+        while self.camera_active and self.running:
             ret, frame = self.cap.read()
             if not ret:
                 continue
@@ -172,7 +273,11 @@ class FaceBadgeSystem:
                     
                     for face_encoding in face_encodings:
                         # Compare with all known faces
-                        matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, tolerance=0.6)
+                        matches = face_recognition.compare_faces(
+                            self.known_face_encodings, 
+                            face_encoding, 
+                            tolerance=0.6
+                        )
                         
                         # Check if any match found
                         if True in matches:
@@ -183,7 +288,7 @@ class FaceBadgeSystem:
                             # Face recognized - stop camera and show badge
                             self.recognized_user = recognized_name
                             self.camera_active = False
-                            self.root.after(0, self.show_badge)
+                            self.show_badge()
                             break
             
             time.sleep(0.1)  # Small delay to prevent excessive CPU usage
@@ -192,79 +297,65 @@ class FaceBadgeSystem:
             self.cap.release()
     
     def show_badge(self):
-        """Display user badge"""
-        self.canvas.delete("all")
+        """Display user badge with animation"""
         self.current_state = "badge"
         
         if not self.recognized_user:
-            print("Error: No recognized user")
+            logging.error("No recognized user")
             self.reset_to_idle()
             return
         
         username = self.recognized_user
-        print(f"Showing badge for: {username}")
+        logging.info(f"Showing badge for: {username}")
         
-        # Check if avatar exists for this user
+        # Get avatar path
         avatar_path = self.avatar_paths.get(username)
         
-        if avatar_path and os.path.exists(avatar_path):
-            # Load and process avatar
-            avatar_img = Image.open(avatar_path)
-            avatar_size = 200
-            avatar_img = avatar_img.resize((avatar_size, avatar_size), Image.Resampling.LANCZOS)
-            
-            # Create circular mask
-            mask = Image.new('L', (avatar_size, avatar_size), 0)
-            draw = ImageDraw.Draw(mask)
-            draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
-            
-            # Apply mask to avatar
-            avatar_img.putalpha(mask)
-            
-            # Convert to PhotoImage
-            self.avatar_photo = ImageTk.PhotoImage(avatar_img)
-            
-            # Display avatar
-            avatar_x = self.screen_width // 2
-            avatar_y = self.screen_height // 2 - 50
-            self.canvas.create_image(avatar_x, avatar_y, image=self.avatar_photo)
-        else:
-            # Create placeholder circle if no avatar
-            avatar_x = self.screen_width // 2
-            avatar_y = self.screen_height // 2 - 50
-            self.canvas.create_oval(avatar_x - 100, avatar_y - 100, avatar_x + 100, avatar_y + 100, 
-                                  fill="gray", outline="white", width=3)
-            # Add initial letter
-            initial = username[0].upper() if username else "?"
-            self.canvas.create_text(avatar_x, avatar_y, 
-                                  text=initial, 
-                                  fill="white", font=("Arial", 60, "bold"))
+        # Create badge screen
+        badge_img = self.create_badge_screen(username, avatar_path)
         
-        # Display user name (capitalize first letter of each word)
-        display_name = username.replace('_', ' ').title()
-        name_y = self.screen_height // 2 + 120
-        self.canvas.create_text(self.screen_width // 2, name_y, 
-                              text=display_name, 
-                              fill="white", font=("Arial", 32, "bold"))
+        # Fade in badge
+        self.fade_image(badge_img, fade_in=True)
         
-        # Display welcome message
-        welcome_y = name_y + 60
-        self.canvas.create_text(self.screen_width // 2, welcome_y, 
-                              text="Welcome!", 
-                              fill="lightgreen", font=("Arial", 24))
+        # Display for 3 seconds
+        time.sleep(3)
         
-        # Schedule return to idle after 5 seconds
-        self.root.after(5000, self.reset_to_idle)
+        # Fade out badge
+        self.fade_image(badge_img, fade_in=False)
+        
+        # Reset to idle
+        time.sleep(0.5)
+        self.reset_to_idle()
     
     def reset_to_idle(self):
         """Reset system to idle state"""
         self.show_idle_screen()
-        # Restart camera
-        self.start_camera_thread()
+        self.recognized_user = None
+        # Restart camera in a new thread
+        camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
+        camera_thread.start()
     
     def run(self):
         """Start the application"""
-        self.root.mainloop()
+        try:
+            # Start camera thread
+            camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
+            camera_thread.start()
+            
+            # Keep main thread alive
+            while self.running:
+                time.sleep(0.1)
+                
+        except KeyboardInterrupt:
+            logging.info("Stopped by user")
+            self.running = False
+            self.camera_active = False
+            self.disp.module_exit()
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            self.running = False
+            self.camera_active = False
+            self.disp.module_exit()
 
 if __name__ == "__main__":
     app = FaceBadgeSystem()
