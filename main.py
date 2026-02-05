@@ -39,8 +39,17 @@ class FaceBadgeSystem:
         self.avatar_paths = {}
         self.load_known_faces()
         
-        # Camera setup
-        self.cap = None
+        # Initialize camera ONCE here
+        logging.info("Initializing camera...")
+        self.cap = cv2.VideoCapture(0)
+        if not self.cap.isOpened():
+            logging.error("Cannot open camera! Please check camera connection.")
+            self.cleanup()
+            raise RuntimeError("Camera initialization failed")
+        else:
+            logging.info("Camera initialized successfully")
+        
+        # Camera state
         self.camera_active = False
         
         # UI state
@@ -252,17 +261,18 @@ class FaceBadgeSystem:
     
     def camera_loop(self):
         """Main camera processing loop"""
-        self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            logging.error("Cannot open camera")
+        if not self.cap or not self.cap.isOpened():
+            logging.error("Camera not available")
             return
         
         self.camera_active = True
-        logging.info("Camera started, waiting for faces...")
+        logging.info("Camera loop started, waiting for faces...")
         
         while self.camera_active and self.running:
             ret, frame = self.cap.read()
             if not ret:
+                logging.warning("Failed to read frame from camera")
+                time.sleep(0.1)
                 continue
             
             if self.current_state == "idle":
@@ -290,7 +300,7 @@ class FaceBadgeSystem:
                             match_index = matches.index(True)
                             recognized_name = self.known_face_names[match_index]
                             
-                            # Face recognized - stop camera and show badge
+                            # Face recognized - pause camera and show badge
                             self.recognized_user = recognized_name
                             self.camera_active = False
                             self.show_badge()
@@ -298,8 +308,7 @@ class FaceBadgeSystem:
             
             time.sleep(0.1)  # Small delay to prevent excessive CPU usage
         
-        if self.cap:
-            self.cap.release()
+        logging.info("Camera loop ended")
     
     def show_badge(self):
         """Display user badge with animation"""
@@ -336,9 +345,25 @@ class FaceBadgeSystem:
         """Reset system to idle state"""
         self.show_idle_screen()
         self.recognized_user = None
-        # Restart camera in a new thread
+        # Restart camera loop in a new thread
         camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
         camera_thread.start()
+    
+    def cleanup(self):
+        """Clean up resources"""
+        logging.info("Cleaning up resources...")
+        self.running = False
+        self.camera_active = False
+        
+        if self.cap:
+            self.cap.release()
+            logging.info("Camera released")
+        
+        try:
+            self.disp.module_exit()
+            logging.info("Display cleaned up")
+        except:
+            pass
     
     def run(self):
         """Start the application"""
@@ -353,15 +378,16 @@ class FaceBadgeSystem:
                 
         except KeyboardInterrupt:
             logging.info("Stopped by user")
-            self.running = False
-            self.camera_active = False
-            self.disp.module_exit()
         except Exception as e:
             logging.error(f"Error: {e}")
-            self.running = False
-            self.camera_active = False
-            self.disp.module_exit()
+        finally:
+            self.cleanup()
 
 if __name__ == "__main__":
-    app = FaceBadgeSystem()
-    app.run()
+    try:
+        app = FaceBadgeSystem()
+        app.run()
+    except Exception as e:
+        logging.error(f"Failed to start application: {e}")
+        import sys
+        sys.exit(1)
