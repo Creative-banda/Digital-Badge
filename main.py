@@ -57,6 +57,15 @@ class FaceBadgeSystem:
         self.recognized_user = None
         self.running = True
         
+        # Cooldown mechanism to prevent multiple rapid detections
+        self.last_recognition_time = 0
+        self.recognition_cooldown = 5.0  # Minimum seconds between recognitions
+        
+        # Detection stability - require multiple consecutive frames
+        self.detection_frames = 0
+        self.frames_required = 3  # Require 3 consecutive frames with same face
+        self.last_detected_name = None
+        
         # Load idle screen
         self.show_idle_screen()
     
@@ -276,6 +285,12 @@ class FaceBadgeSystem:
                 continue
             
             if self.current_state == "idle":
+                # Check cooldown period
+                current_time = time.time()
+                if current_time - self.last_recognition_time < self.recognition_cooldown:
+                    time.sleep(0.1)
+                    continue
+                
                 # Convert BGR to RGB
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
@@ -285,6 +300,9 @@ class FaceBadgeSystem:
                 if face_locations and len(self.known_face_encodings) > 0:
                     # Encode faces
                     face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+                    
+                    face_detected = False
+                    detected_name = None
                     
                     for face_encoding in face_encodings:
                         # Compare with all known faces
@@ -298,13 +316,36 @@ class FaceBadgeSystem:
                         if True in matches:
                             # Get the index of first match
                             match_index = matches.index(True)
-                            recognized_name = self.known_face_names[match_index]
-                            
-                            # Face recognized - pause camera and show badge
-                            self.recognized_user = recognized_name
+                            detected_name = self.known_face_names[match_index]
+                            face_detected = True
+                            break
+                    
+                    if face_detected:
+                        # Check if it's the same person as last frame
+                        if detected_name == self.last_detected_name:
+                            self.detection_frames += 1
+                        else:
+                            # Different person or first detection
+                            self.detection_frames = 1
+                            self.last_detected_name = detected_name
+                        
+                        # Only trigger if we have enough consecutive frames
+                        if self.detection_frames >= self.frames_required:
+                            logging.info(f"Stable detection: {detected_name}")
+                            self.recognized_user = detected_name
+                            self.last_recognition_time = current_time
+                            self.detection_frames = 0
+                            self.last_detected_name = None
                             self.camera_active = False
                             self.show_badge()
-                            break
+                    else:
+                        # No face detected, reset counter
+                        self.detection_frames = 0
+                        self.last_detected_name = None
+                else:
+                    # No face in frame, reset counter
+                    self.detection_frames = 0
+                    self.last_detected_name = None
             
             time.sleep(0.1)  # Small delay to prevent excessive CPU usage
         
@@ -337,17 +378,24 @@ class FaceBadgeSystem:
         # Fade out badge
         self.fade_image(badge_img, fade_in=False)
         
-        # Reset to idle
+        # Small pause before returning to idle
         time.sleep(0.5)
+        
+        # Reset to idle
         self.reset_to_idle()
     
     def reset_to_idle(self):
         """Reset system to idle state"""
+        logging.info("Resetting to idle state...")
         self.show_idle_screen()
         self.recognized_user = None
+        self.detection_frames = 0
+        self.last_detected_name = None
+        
         # Restart camera loop in a new thread
         camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
         camera_thread.start()
+        logging.info("Camera loop restarted")
     
     def cleanup(self):
         """Clean up resources"""
