@@ -48,9 +48,15 @@ Badge/
 ├── avatars/
 │   ├── ahtesham_avatar.jpeg    # Your avatar
 │   └── [username]_avatar.jpg   # Pattern: {username}_avatar.{ext}
-└── lib/                         # ← LCD library (one dir up)
-    └── LCD_1inch28/
+└── lib/                         # ← LCD library (OPTION 1: Copy here!)
+    └── LCD_1inch28/             # OR OPTION 2: Keep one dir up
 ```
+
+**📖 LCD Library Setup:** See `LCD_LIBRARY_SETUP.md` for details on where to place the `lib` folder.
+- **Option 1 (Recommended):** Copy `lib/` INTO your Badge folder
+- **Option 2:** Keep `lib/` one directory up from Badge
+
+The code automatically detects either location!
 
 ### To Add New Users:
 
@@ -132,11 +138,15 @@ vcgencmd get_camera
 
 #### "Import lib could not be resolved"
 ```bash
-# LCD library should be one directory up
-# Structure should be:
-# parent_dir/
-#   ├── lib/LCD_1inch28/
-#   └── Badge/main.py
+# LCD library can be in TWO locations (both work!):
+
+# OPTION 1: Inside your Badge folder (recommended)
+Badge/lib/LCD_1inch28/
+
+# OPTION 2: One directory up from Badge
+parent_folder/lib/LCD_1inch28/
+
+# See LCD_LIBRARY_SETUP.md for detailed setup!
 ```
 
 #### Display upside down?

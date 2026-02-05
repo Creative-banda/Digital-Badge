@@ -12,7 +12,12 @@ import threading
 import glob
 import logging
 
-sys.path.append("..")
+# Add multiple possible paths for LCD library
+# Option 1: lib folder in same directory as this script
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Option 2: lib folder one level up (original structure)
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
 from lib import LCD_1inch28
 
 logging.basicConfig(level=logging.INFO)
