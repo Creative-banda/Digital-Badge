@@ -27,14 +27,15 @@ LCD_SIZE = 240
 class FaceBadgeSystem:
     def __init__(self):
         # Initialize BOTH LCD displays
+        # The LCD_1inch28 library uses different CS pins for multiple displays
         logging.info("Initializing display 1...")
-        self.disp1 = LCD_1inch28.LCD_1inch28(spi_bus=0, spi_dev=0)
+        self.disp1 = LCD_1inch28.LCD_1inch28()
         self.disp1.Init()
         self.disp1.clear()
         self.disp1.bl_DutyCycle(50)
         
         logging.info("Initializing display 2...")
-        self.disp2 = LCD_1inch28.LCD_1inch28(spi_bus=0, spi_dev=1)
+        self.disp2 = LCD_1inch28.LCD_1inch28()
         self.disp2.Init()
         self.disp2.clear()
         self.disp2.bl_DutyCycle(50)
