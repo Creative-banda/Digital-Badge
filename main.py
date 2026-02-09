@@ -26,11 +26,18 @@ LCD_SIZE = 240
 
 class FaceBadgeSystem:
     def __init__(self):
-        # Initialize LCD display
-        self.disp = LCD_1inch28.LCD_1inch28()
-        self.disp.Init()
-        self.disp.clear()
-        self.disp.bl_DutyCycle(50)
+        # Initialize BOTH LCD displays
+        logging.info("Initializing display 1...")
+        self.disp1 = LCD_1inch28.LCD_1inch28(spi_bus=0, spi_dev=0)
+        self.disp1.Init()
+        self.disp1.clear()
+        self.disp1.bl_DutyCycle(50)
+        
+        logging.info("Initializing display 2...")
+        self.disp2 = LCD_1inch28.LCD_1inch28(spi_bus=0, spi_dev=1)
+        self.disp2.Init()
+        self.disp2.clear()
+        self.disp2.bl_DutyCycle(50)
         
         # Load animation frames
         self.idle_frames = self.load_animation_frames("animations/idle")
@@ -158,13 +165,15 @@ class FaceBadgeSystem:
         return None
     
     def fade_image(self, img, fade_in=True, steps=20, delay=0.02):
-        """Fade in/out an image on the LCD display"""
+        """Fade in/out an image on BOTH LCD displays"""
         black = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
         
         for i in range(steps + 1):
             alpha = i / steps if fade_in else 1 - (i / steps)
             frame = Image.blend(black, img, alpha)
-            self.disp.ShowImage(frame.rotate(180))
+            rotated = frame.rotate(180)
+            self.disp1.ShowImage(rotated)
+            self.disp2.ShowImage(rotated)
             time.sleep(delay)
     
     def create_text_screen(self, text, font_size=24):
@@ -308,9 +317,11 @@ class FaceBadgeSystem:
             
             # IDLE STATE: Play idle animation while waiting for face
             while self.running:
-                # Show next idle frame if available
+                # Show next idle frame if available on BOTH displays
                 if self.idle_frames:
-                    self.disp.ShowImage(self.idle_frames[idle_frame_idx].rotate(180))
+                    rotated = self.idle_frames[idle_frame_idx].rotate(180)
+                    self.disp1.ShowImage(rotated)
+                    self.disp2.ShowImage(rotated)
                     idle_frame_idx = (idle_frame_idx + 1) % len(self.idle_frames)
                 
                 frame_counter += 1
@@ -335,9 +346,11 @@ class FaceBadgeSystem:
             recognized_user = None
             
             while self.running and self.current_state == "scan":
-                # Show next scan frame if available
+                # Show next scan frame if available on BOTH displays
                 if self.scan_frames:
-                    self.disp.ShowImage(self.scan_frames[scan_frame_idx].rotate(180))
+                    rotated = self.scan_frames[scan_frame_idx].rotate(180)
+                    self.disp1.ShowImage(rotated)
+                    self.disp2.ShowImage(rotated)
                     scan_frame_idx = (scan_frame_idx + 1) % len(self.scan_frames)
                 
                 frame_counter += 1
@@ -435,13 +448,17 @@ class FaceBadgeSystem:
         logging.info("Badge display complete, returning to idle")
     
     def show_idle_screen(self):
-        """Display first idle frame (used as fallback)"""
+        """Display first idle frame (used as fallback) on BOTH displays"""
         if self.idle_frames:
-            self.disp.ShowImage(self.idle_frames[0].rotate(180))
+            rotated = self.idle_frames[0].rotate(180)
+            self.disp1.ShowImage(rotated)
+            self.disp2.ShowImage(rotated)
         else:
             # Fallback to black screen if no animation
             idle_img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
-            self.disp.ShowImage(idle_img.rotate(180))
+            rotated = idle_img.rotate(180)
+            self.disp1.ShowImage(rotated)
+            self.disp2.ShowImage(rotated)
         self.current_state = "idle"
     
     def cleanup(self):
@@ -454,8 +471,9 @@ class FaceBadgeSystem:
             logging.info("Camera released")
         
         try:
-            self.disp.module_exit()
-            logging.info("Display cleaned up")
+            self.disp1.module_exit()
+            self.disp2.module_exit()
+            logging.info("Displays cleaned up")
         except:
             pass
     
