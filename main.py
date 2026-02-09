@@ -27,24 +27,29 @@ LCD_SIZE = 240
 class FaceBadgeSystem:
     def __init__(self):
         # Initialize LCD 1 with default pins
-        # DIN=19(GPIO10), CLK=23(GPIO11), CS=24(GPIO8), DC=22(GPIO25), RST=13(GPIO27), BL=12(GPIO18)
+        # Uses SPI0.0, DC=GPIO25, RST=GPIO27, BL=GPIO18
         logging.info("Initializing display 1 (default pins)...")
         self.disp1 = LCD_1inch28.LCD_1inch28()
         self.disp1.Init()
         self.disp1.clear()
         self.disp1.bl_DutyCycle(50)
         
-        # Initialize LCD 2 with custom pins
-        # DIN=38(GPIO20), CLK=40(GPIO21), CS=26(GPIO7), DC=16(GPIO23), RST=18(GPIO24), BL=31(GPIO6)
-        logging.info("Initializing display 2 (custom pins: DC=23, RST=24, BL=6)...")
+        # Initialize LCD 2 with custom pins (from your diagram)
+        # Uses SPI0.1, DC=GPIO23, RST=GPIO24, BL=GPIO6
+        logging.info("Initializing display 2 (custom pins)...")
+        import spidev
+        spi2 = spidev.SpiDev(0, 1)  # SPI bus 0, device 1 (CS1)
         self.disp2 = LCD_1inch28.LCD_1inch28(
-            dc_pin=23,   # GPIO23 (pin 16)
-            rst_pin=24,  # GPIO24 (pin 18)
-            bl_pin=6     # GPIO6 (pin 31)
+            spi=spi2,
+            rst=24,   # GPIO24 (pin 18 in your diagram)
+            dc=23,    # GPIO23 (pin 16 in your diagram)
+            bl=6      # GPIO6 (pin 31 in your diagram)
         )
         self.disp2.Init()
         self.disp2.clear()
         self.disp2.bl_DutyCycle(50)
+        
+        logging.info("Both displays initialized successfully!")
         
         # Load animation frames
         self.idle_frames = self.load_animation_frames("animations/idle")
