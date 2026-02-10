@@ -157,15 +157,16 @@ class FaceBadgeSystem:
         
         return None
     
-    def fade_image(self, img, fade_in=True, steps=20, delay=0.02):
-        """Fade in/out an image on the LCD display"""
+    def fade_image(self, img, fade_in=True, steps=10, delay=0):
+        """Fade in/out an image on the LCD display - NO DELAY for max speed"""
         black = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
         
         for i in range(steps + 1):
             alpha = i / steps if fade_in else 1 - (i / steps)
             frame = Image.blend(black, img, alpha)
             self.disp.ShowImage(frame.rotate(180))
-            time.sleep(delay)
+            if delay > 0:
+                time.sleep(delay)
     
     def create_text_screen(self, text, font_size=24):
         """Create an image with centered text"""
@@ -295,8 +296,8 @@ class FaceBadgeSystem:
         
         idle_frame_idx = 0
         scan_frame_idx = 0
-        idle_delay = 0.03  # Fast animation playback
-        scan_delay = 0.02  # Even faster for scan
+        idle_delay = 0  # NO DELAY - max speed!
+        scan_delay = 0  # NO DELAY - max speed!
         detect_every_n_frames = 3  # Only detect faces every 3rd frame for speed
         frame_counter = 0
         
@@ -329,7 +330,8 @@ class FaceBadgeSystem:
                             frame_counter = 0
                             break
                 
-                time.sleep(idle_delay)
+                if idle_delay > 0:
+                    time.sleep(idle_delay)
             
             # SCAN STATE: Play scan animation while recognizing
             recognized_user = None
@@ -346,7 +348,8 @@ class FaceBadgeSystem:
                 if frame_counter % detect_every_n_frames == 0:
                     ret, frame = self.cap.read()
                     if not ret:
-                        time.sleep(scan_delay)
+                        if scan_delay > 0:
+                            time.sleep(scan_delay)
                         continue
                     
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -404,7 +407,8 @@ class FaceBadgeSystem:
                     frame_counter = 0
                     break
                 
-                time.sleep(scan_delay)
+                if scan_delay > 0:
+                    time.sleep(scan_delay)
         
         logging.info("Detection stopped")
     
@@ -420,17 +424,16 @@ class FaceBadgeSystem:
         # Create badge screen
         badge_img = self.create_badge_screen(username, avatar_path)
         
-        # Fade in badge
-        self.fade_image(badge_img, fade_in=True)
+        # Fade in badge (no delay)
+        self.fade_image(badge_img, fade_in=True, steps=10, delay=0)
         
-        # Display for 3 seconds
-        time.sleep(3)
+        # Display for 2 seconds (reduced from 3)
+        time.sleep(2)
         
-        # Fade out badge
-        self.fade_image(badge_img, fade_in=False)
+        # Fade out badge (no delay)
+        self.fade_image(badge_img, fade_in=False, steps=10, delay=0)
         
-        # Small pause before returning to idle animation
-        time.sleep(0.5)
+        # No pause - go straight to idle animation
         
         logging.info("Badge display complete, returning to idle")
     
