@@ -79,6 +79,8 @@ class FaceBadgeSystem:
                 img = Image.open(frame_file).convert("RGB")
                 # Resize from 500x500 to 240x240
                 img = img.resize((LCD_SIZE, LCD_SIZE), Image.LANCZOS)
+                # PRE-ROTATE frames to avoid rotation on every display call
+                img = img.rotate(180)
                 frames.append(img)
             except Exception as e:
                 logging.error(f"Failed to load frame {frame_file}: {e}")
@@ -164,6 +166,7 @@ class FaceBadgeSystem:
         for i in range(steps + 1):
             alpha = i / steps if fade_in else 1 - (i / steps)
             frame = Image.blend(black, img, alpha)
+            # Badge images need rotation (not pre-rotated)
             self.disp.ShowImage(frame.rotate(180))
             if delay > 0:
                 time.sleep(delay)
@@ -298,8 +301,13 @@ class FaceBadgeSystem:
         scan_frame_idx = 0
         idle_delay = 0  # NO DELAY - max speed!
         scan_delay = 0  # NO DELAY - max speed!
-        detect_every_n_frames = 3  # Only detect faces every 3rd frame for speed
+        detect_every_n_frames = 10  # Detect less frequently for smoother animation
         frame_counter = 0
+        
+        # Performance monitoring
+        fps_counter = 0
+        fps_start_time = time.time()
+        last_log_time = time.time()
         
         while self.running:
             # Reset detection state
@@ -309,25 +317,42 @@ class FaceBadgeSystem:
             
             # IDLE STATE: Play idle animation while waiting for face
             while self.running:
+                frame_start = time.time()
+                
                 # Show next idle frame if available
                 if self.idle_frames:
-                    self.disp.ShowImage(self.idle_frames[idle_frame_idx].rotate(180))
+                    self.disp.ShowImage(self.idle_frames[idle_frame_idx])  # Already rotated!
                     idle_frame_idx = (idle_frame_idx + 1) % len(self.idle_frames)
                 
                 frame_counter += 1
+                fps_counter += 1
+                
+                # Log FPS every 2 seconds
+                if time.time() - last_log_time > 2.0:
+                    elapsed = time.time() - fps_start_time
+                    current_fps = fps_counter / elapsed
+                    logging.info(f"IDLE Animation FPS: {current_fps:.1f}")
+                    fps_counter = 0
+                    fps_start_time = time.time()
+                    last_log_time = time.time()
                 
                 # Only check for face every N frames to keep animation smooth
                 if frame_counter % detect_every_n_frames == 0:
+                    detect_start = time.time()
                     ret, frame = self.cap.read()
                     if ret:
                         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         face_locations = face_recognition.face_locations(rgb_frame)
+                        detect_time = (time.time() - detect_start) * 1000
                         
                         if face_locations and len(self.known_face_encodings) > 0:
+                            logging.info(f"Face detection took: {detect_time:.0f}ms")
                             # Face detected! Switch to SCAN state
                             self.current_state = "scan"
                             scan_frame_idx = 0
                             frame_counter = 0
+                            fps_counter = 0
+                            fps_start_time = time.time()
                             break
                 
                 if idle_delay > 0:
@@ -339,13 +364,24 @@ class FaceBadgeSystem:
             while self.running and self.current_state == "scan":
                 # Show next scan frame if available
                 if self.scan_frames:
-                    self.disp.ShowImage(self.scan_frames[scan_frame_idx].rotate(180))
+                    self.disp.ShowImage(self.scan_frames[scan_frame_idx])  # Already rotated!
                     scan_frame_idx = (scan_frame_idx + 1) % len(self.scan_frames)
                 
                 frame_counter += 1
+                fps_counter += 1
+                
+                # Log FPS every 2 seconds
+                if time.time() - last_log_time > 2.0:
+                    elapsed = time.time() - fps_start_time
+                    current_fps = fps_counter / elapsed
+                    logging.info(f"SCAN Animation FPS: {current_fps:.1f}")
+                    fps_counter = 0
+                    fps_start_time = time.time()
+                    last_log_time = time.time()
                 
                 # Check face recognition every N frames
                 if frame_counter % detect_every_n_frames == 0:
+                    recognition_start = time.time()
                     ret, frame = self.cap.read()
                     if not ret:
                         if scan_delay > 0:
@@ -354,6 +390,7 @@ class FaceBadgeSystem:
                     
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     face_locations = face_recognition.face_locations(rgb_frame)
+                    recognition_time = (time.time() - recognition_start) * 1000
                     
                     if not face_locations:
                         # Face lost, only break if we haven't recognized anyone yet
@@ -391,7 +428,7 @@ class FaceBadgeSystem:
                             
                             # Stable recognition achieved!
                             if self.detection_frames >= self.frames_required and recognized_user is None:
-                                logging.info(f"Face recognized: {detected_name}")
+                                logging.info(f"Face recognized: {detected_name} (took {recognition_time:.0f}ms)")
                                 recognized_user = detected_name
                                 # Continue playing animation, don't break yet
                         else:
