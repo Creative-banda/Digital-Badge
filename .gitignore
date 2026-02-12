@@ -18,6 +18,7 @@ env/
 
 # Temporary files
 temp_captures/
+failed_uploads/
 *.log
 
 # OS files

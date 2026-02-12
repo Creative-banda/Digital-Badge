@@ -15,6 +15,8 @@ import requests
 import base64
 from datetime import datetime
 from dotenv import load_dotenv
+import threading
+import json
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,6 +47,10 @@ FACE_MATCH_TOLERANCE = 0.5      # Lower = stricter matching (0.6 default, 0.5 re
 # Google Sheets Integration (loaded from .env file)
 ENABLE_GOOGLE_SHEETS = os.getenv("ENABLE_GOOGLE_SHEETS", "True").lower() == "true"
 GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
+
+# Backup/Fallback Configuration
+BACKUP_DIR = "failed_uploads"   # Directory to store failed uploads
+BACKUP_JSON = "failed_uploads/pending_uploads.json"  # JSON file tracking failed uploads
 
 # Validate Google Sheets configuration
 if ENABLE_GOOGLE_SHEETS and not GOOGLE_APPS_SCRIPT_URL:
@@ -87,6 +93,11 @@ class FaceBadgeSystem:
         
         # Store latest camera frame for Google Sheets upload
         self.latest_frame = None
+        
+        # Create backup directory for failed uploads
+        if ENABLE_GOOGLE_SHEETS and not os.path.exists(BACKUP_DIR):
+            os.makedirs(BACKUP_DIR)
+            logging.info(f"Created backup directory: {BACKUP_DIR}")
         
         # Initialize camera ONCE here
         logging.info("Initializing camera...")
@@ -239,10 +250,78 @@ class FaceBadgeSystem:
             logging.error(f"Failed to save frame: {e}")
             return None
     
+    def save_failed_upload(self, username, current_time, current_image_path, known_face_path, error_msg):
+        """Save failed upload data locally for later retry"""
+        try:
+            # Create permanent backup directory structure
+            backup_images_dir = os.path.join(BACKUP_DIR, "images")
+            if not os.path.exists(backup_images_dir):
+                os.makedirs(backup_images_dir)
+            
+            # Copy images to backup directory with timestamp
+            timestamp_safe = current_time.replace(":", "-").replace(" ", "_")
+            
+            # Copy current capture
+            backup_current_path = os.path.join(backup_images_dir, f"{username}_{timestamp_safe}_current.jpg")
+            import shutil
+            shutil.copy2(current_image_path, backup_current_path)
+            
+            # Copy known face image
+            backup_known_path = os.path.join(backup_images_dir, f"{username}_{timestamp_safe}_known.jpg")
+            shutil.copy2(known_face_path, backup_known_path)
+            
+            # Create entry for JSON
+            failed_entry = {
+                "name": username,
+                "time": current_time,
+                "timestamp": datetime.now().isoformat(),
+                "current_image_path": backup_current_path,
+                "known_face_path": backup_known_path,
+                "error": error_msg,
+                "status": "pending"
+            }
+            
+            # Load existing failed uploads or create new list
+            failed_uploads = []
+            if os.path.exists(BACKUP_JSON):
+                try:
+                    with open(BACKUP_JSON, 'r') as f:
+                        failed_uploads = json.load(f)
+                except:
+                    failed_uploads = []
+            
+            # Add new failed upload
+            failed_uploads.append(failed_entry)
+            
+            # Save to JSON
+            with open(BACKUP_JSON, 'w') as f:
+                json.dump(failed_uploads, f, indent=2)
+            
+            logging.info(f"💾 Saved failed upload locally: {username} at {current_time}")
+            logging.info(f"📁 Backup location: {BACKUP_DIR}")
+            
+        except Exception as e:
+            logging.error(f"Failed to save backup data: {e}")
+    
     def upload_to_google_sheets(self, username, current_frame):
-        """Upload attendance data to Google Sheets"""
+        """Upload attendance data to Google Sheets in background thread"""
         if not ENABLE_GOOGLE_SHEETS:
             return
+        
+        # Start upload in background thread - completely non-blocking!
+        upload_thread = threading.Thread(
+            target=self._upload_worker,
+            args=(username, current_frame.copy()),  # Copy frame to avoid race conditions
+            daemon=True  # Daemon thread won't block program exit
+        )
+        upload_thread.start()
+        logging.info(f"📤 Started background upload for {username}")
+    
+    def _upload_worker(self, username, current_frame):
+        """Background worker thread for Google Sheets upload"""
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        temp_frame_path = None
+        known_face_path = None
         
         try:
             # Save current frame to temporary file
@@ -265,9 +344,6 @@ class FaceBadgeSystem:
                 logging.error("Failed to encode images")
                 return
             
-            # Get current time in readable format
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
             # Prepare data for Google Sheets
             data = {
                 "name": username,
@@ -277,24 +353,35 @@ class FaceBadgeSystem:
             }
             
             # Send to Google Apps Script
-            logging.info(f"Uploading attendance data for {username} to Google Sheets...")
-            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=10)
+            logging.info(f"🔄 Uploading attendance data for {username} to Google Sheets...")
+            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
             
             if response.status_code == 200:
-                logging.info(f"✓ Successfully uploaded to Google Sheets: {username} at {current_time}")
+                logging.info(f"✅ Successfully uploaded to Google Sheets: {username} at {current_time}")
+                # Clean up temporary file on success
+                try:
+                    os.remove(temp_frame_path)
+                except:
+                    pass
             else:
-                logging.error(f"✗ Failed to upload: HTTP {response.status_code}")
-            
-            # Clean up temporary file
-            try:
-                os.remove(temp_frame_path)
-            except:
-                pass
+                error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
+                logging.error(f"❌ Failed to upload: {error_msg}")
+                # Save failed upload locally
+                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
                 
         except requests.exceptions.Timeout:
-            logging.error("Google Sheets upload timed out")
+            error_msg = "Request timeout (30s)"
+            logging.error(f"⏱️  Google Sheets upload timed out (background thread)")
+            # Save failed upload locally
+            if temp_frame_path and known_face_path:
+                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
+                
         except Exception as e:
-            logging.error(f"Error uploading to Google Sheets: {e}")
+            error_msg = str(e)
+            logging.error(f"❌ Error uploading to Google Sheets (background thread): {e}")
+            # Save failed upload locally
+            if temp_frame_path and known_face_path:
+                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
     
     def fade_image(self, img, fade_in=True, steps=10, delay=0):
         """Fade in/out an image on the LCD display - NO DELAY for max speed"""
@@ -698,14 +785,11 @@ class FaceBadgeSystem:
             # Get avatar path
             avatar_path = self.avatar_paths.get(username)
             
-            # Upload to Google Sheets (in background, non-blocking)
+            # Upload to Google Sheets in BACKGROUND THREAD (non-blocking!)
             if ENABLE_GOOGLE_SHEETS and self.latest_frame is not None:
-                try:
-                    # Upload in a try-except to not block the badge display
-                    self.upload_to_google_sheets(username, self.latest_frame)
-                except Exception as e:
-                    logging.error(f"Google Sheets upload failed: {e}")
+                self.upload_to_google_sheets(username, self.latest_frame)
             
+            # Badge display continues immediately without waiting for upload!
             # Create badge screen
             badge_img = self.create_badge_screen(username, avatar_path)
             
