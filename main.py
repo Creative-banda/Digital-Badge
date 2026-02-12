@@ -10,6 +10,7 @@ import os
 import time
 import glob
 import logging
+import random
 
 # Add multiple possible paths for LCD library
 # Option 1: lib folder in same directory as this script
@@ -32,7 +33,20 @@ DETECT_EVERY_N_FRAMES = 30      # Check for faces every N frames (higher = smoot
 CAMERA_SCALE = 0.5              # Scale camera frames before detection (0.5 = half size, 4x faster)
 FACE_DETECTION_MODEL = "hog"    # "hog" = fast but less accurate, "cnn" = slow but very accurate
 FRAMES_REQUIRED_FOR_MATCH = 3   # Consecutive frames needed to confirm face (stability)
+FACE_MATCH_TOLERANCE = 0.5      # Lower = stricter matching (0.6 default, 0.5 recommended, 0.4 very strict)
 # ============================================
+
+# Funny messages for unknown faces (randomly selected)
+UNKNOWN_FACE_MESSAGES = [
+    "Nice try, stranger! 😎\nBut I only know cool people.",
+    "Hmm... Do I know you? 🤔\nNope! Access Denied!",
+    "Error 404:\nFace Not Found! 😅",
+    "Sorry, you're not on\nthe VIP list! 🎭",
+    "Who dis? 👀\nNew phone, who dis?",
+    "Unauthorized Human\nDetected! 🚫😄",
+    "My database says:\n'Never seen this face!' 🤷",
+    "Plot twist:\nYou're not in my contacts! 📱"
+]
 
 
 class FaceBadgeSystem:
@@ -296,6 +310,60 @@ class FaceBadgeSystem:
         
         return img
     
+    def create_rejection_screen(self, message):
+        """Create a funny rejection screen for unknown faces"""
+        img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (20, 20, 40))  # Dark blue background
+        draw = ImageDraw.Draw(img)
+        
+        # Draw big warning icon (circle with X)
+        icon_size = 80
+        x = LCD_SIZE // 2
+        y = 60
+        
+        # Red circle
+        draw.ellipse(
+            (x - icon_size//2, y - icon_size//2, 
+             x + icon_size//2, y + icon_size//2),
+            fill=(200, 50, 50), outline=(255, 100, 100), width=3
+        )
+        
+        # White X
+        offset = icon_size // 3
+        draw.line(
+            (x - offset, y - offset, x + offset, y + offset),
+            fill=(255, 255, 255), width=6
+        )
+        draw.line(
+            (x - offset, y + offset, x + offset, y - offset),
+            fill=(255, 255, 255), width=6
+        )
+        
+        # Draw funny message
+        try:
+            msg_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                16
+            )
+        except:
+            msg_font = ImageFont.load_default()
+        
+        # Split message into lines
+        lines = message.split('\n')
+        y_offset = 130
+        
+        for line in lines:
+            bbox = draw.textbbox((0, 0), line, font=msg_font)
+            tw = bbox[2] - bbox[0]
+            draw.text(
+                ((LCD_SIZE - tw) // 2, y_offset), 
+                line, 
+                fill=(255, 220, 100),  # Yellow text
+                font=msg_font
+            )
+            y_offset += 22
+        
+        return img
+    
     def show_idle_screen(self):
         """Display idle screen"""
         idle_img = self.create_text_screen("Face Badge\nSystem\nReady", font_size=24)
@@ -431,14 +499,23 @@ class FaceBadgeSystem:
                             matches = face_recognition.compare_faces(
                                 self.known_face_encodings,
                                 face_encoding,
-                                tolerance=0.6
+                                tolerance=FACE_MATCH_TOLERANCE
                             )
                             
                             if True in matches:
-                                match_index = matches.index(True)
-                                detected_name = self.known_face_names[match_index]
-                                face_detected = True
-                                break
+                                # Get face distances to find best match
+                                face_distances = face_recognition.face_distance(
+                                    self.known_face_encodings, 
+                                    face_encoding
+                                )
+                                best_match_index = np.argmin(face_distances)
+                                
+                                # Only accept if it's a good match
+                                if matches[best_match_index] and face_distances[best_match_index] < FACE_MATCH_TOLERANCE:
+                                    detected_name = self.known_face_names[best_match_index]
+                                    face_detected = True
+                                    logging.info(f"Match confidence: {1 - face_distances[best_match_index]:.2f}")
+                                    break
                         
                         if face_detected:
                             if detected_name == self.last_detected_name:
@@ -453,10 +530,18 @@ class FaceBadgeSystem:
                                 recognized_user = detected_name
                                 # Continue playing animation, don't break yet
                         else:
-                            # Face present but not recognized
-                            if recognized_user is None:
-                                self.detection_frames = 0
-                                self.last_detected_name = None
+                            # Face present but NOT RECOGNIZED - check if we've seen unknown face enough times
+                            if self.last_detected_name != "UNKNOWN":
+                                self.last_detected_name = "UNKNOWN"
+                                self.detection_frames = 1
+                            else:
+                                self.detection_frames += 1
+                            
+                            # Show funny message for unknown face after stable detection
+                            if self.detection_frames >= self.frames_required and recognized_user is None:
+                                logging.info(f"Unknown face detected (took {recognition_time:.0f}ms)")
+                                recognized_user = "UNKNOWN"
+                                # Continue animation, will show rejection message
                 
                 # Check if scan animation completed one full loop after recognition
                 if recognized_user is not None and scan_frame_idx == 0 and frame_counter > detect_every_n_frames:
@@ -476,24 +561,40 @@ class FaceBadgeSystem:
         
         logging.info(f"Showing badge for: {username}")
         
-        # Get avatar path
-        avatar_path = self.avatar_paths.get(username)
-        
-        # Create badge screen
-        badge_img = self.create_badge_screen(username, avatar_path)
-        
-        # Fade in badge (no delay)
-        self.fade_image(badge_img, fade_in=True, steps=10, delay=0)
-        
-        # Display for 2 seconds (reduced from 3)
-        time.sleep(2)
-        
-        # Fade out badge (no delay)
-        self.fade_image(badge_img, fade_in=False, steps=10, delay=0)
-        
-        # No pause - go straight to idle animation
-        
-        logging.info("Badge display complete, returning to idle")
+        # Check if unknown face
+        if username == "UNKNOWN":
+            # Show funny rejection message
+            funny_msg = random.choice(UNKNOWN_FACE_MESSAGES)
+            badge_img = self.create_rejection_screen(funny_msg)
+            
+            # Fade in
+            self.fade_image(badge_img, fade_in=True, steps=10, delay=0)
+            
+            # Display for 3 seconds (longer so they can read the joke)
+            time.sleep(3)
+            
+            # Fade out
+            self.fade_image(badge_img, fade_in=False, steps=10, delay=0)
+            
+            logging.info("Unknown face rejected with humor!")
+        else:
+            # Known face - show normal badge
+            # Get avatar path
+            avatar_path = self.avatar_paths.get(username)
+            
+            # Create badge screen
+            badge_img = self.create_badge_screen(username, avatar_path)
+            
+            # Fade in badge (no delay)
+            self.fade_image(badge_img, fade_in=True, steps=10, delay=0)
+            
+            # Display for 2 seconds (reduced from 3)
+            time.sleep(2)
+            
+            # Fade out badge (no delay)
+            self.fade_image(badge_img, fade_in=False, steps=10, delay=0)
+            
+            logging.info("Badge display complete, returning to idle")
     
     def show_idle_screen(self):
         """Display first idle frame (used as fallback)"""
