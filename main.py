@@ -23,6 +23,17 @@ logging.basicConfig(level=logging.INFO)
 
 LCD_SIZE = 240
 
+# ============================================
+# PERFORMANCE CONFIGURATION
+# ============================================
+# Adjust these values to balance animation smoothness vs face detection responsiveness
+DETECT_EVERY_N_FRAMES = 30      # Check for faces every N frames (higher = smoother animation, slower detection)
+                                # At 26 FPS: 30 frames = ~1.2 second detection delay
+CAMERA_SCALE = 0.5              # Scale camera frames before detection (0.5 = half size, 4x faster)
+FACE_DETECTION_MODEL = "hog"    # "hog" = fast but less accurate, "cnn" = slow but very accurate
+FRAMES_REQUIRED_FOR_MATCH = 3   # Consecutive frames needed to confirm face (stability)
+# ============================================
+
 
 class FaceBadgeSystem:
     def __init__(self):
@@ -58,8 +69,10 @@ class FaceBadgeSystem:
         
         # Detection stability - require multiple consecutive frames
         self.detection_frames = 0
-        self.frames_required = 3
+        self.frames_required = FRAMES_REQUIRED_FOR_MATCH
         self.last_detected_name = None
+        
+        logging.info(f"Performance config: detect_interval={DETECT_EVERY_N_FRAMES}, camera_scale={CAMERA_SCALE}, model={FACE_DETECTION_MODEL}")
     
     def load_animation_frames(self, folder_path):
         """Load and resize animation frames from folder"""
@@ -301,13 +314,15 @@ class FaceBadgeSystem:
         scan_frame_idx = 0
         idle_delay = 0  # NO DELAY - max speed!
         scan_delay = 0  # NO DELAY - max speed!
-        detect_every_n_frames = 10  # Detect less frequently for smoother animation
+        detect_every_n_frames = DETECT_EVERY_N_FRAMES
         frame_counter = 0
         
         # Performance monitoring
         fps_counter = 0
         fps_start_time = time.time()
         last_log_time = time.time()
+        
+        logging.info(f"Detection interval: every {detect_every_n_frames} frames (~{detect_every_n_frames/26:.1f}s at 26fps)")
         
         while self.running:
             # Reset detection state
@@ -317,8 +332,6 @@ class FaceBadgeSystem:
             
             # IDLE STATE: Play idle animation while waiting for face
             while self.running:
-                frame_start = time.time()
-                
                 # Show next idle frame if available
                 if self.idle_frames:
                     self.disp.ShowImage(self.idle_frames[idle_frame_idx])  # Already rotated!
@@ -328,25 +341,29 @@ class FaceBadgeSystem:
                 fps_counter += 1
                 
                 # Log FPS every 2 seconds
-                if time.time() - last_log_time > 2.0:
-                    elapsed = time.time() - fps_start_time
-                    current_fps = fps_counter / elapsed
+                current_time = time.time()
+                if current_time - last_log_time > 2.0:
+                    elapsed = current_time - fps_start_time
+                    current_fps = fps_counter / elapsed if elapsed > 0 else 0
                     logging.info(f"IDLE Animation FPS: {current_fps:.1f}")
                     fps_counter = 0
-                    fps_start_time = time.time()
-                    last_log_time = time.time()
+                    fps_start_time = current_time
+                    last_log_time = current_time
                 
                 # Only check for face every N frames to keep animation smooth
                 if frame_counter % detect_every_n_frames == 0:
                     detect_start = time.time()
                     ret, frame = self.cap.read()
                     if ret:
-                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        face_locations = face_recognition.face_locations(rgb_frame)
+                        # Resize camera frame for faster processing
+                        small_frame = cv2.resize(frame, (0, 0), fx=CAMERA_SCALE, fy=CAMERA_SCALE)
+                        rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                        # Use faster HOG model instead of CNN
+                        face_locations = face_recognition.face_locations(rgb_frame, model=FACE_DETECTION_MODEL)
                         detect_time = (time.time() - detect_start) * 1000
                         
                         if face_locations and len(self.known_face_encodings) > 0:
-                            logging.info(f"Face detection took: {detect_time:.0f}ms")
+                            logging.info(f"Face detected! Detection took: {detect_time:.0f}ms")
                             # Face detected! Switch to SCAN state
                             self.current_state = "scan"
                             scan_frame_idx = 0
@@ -371,13 +388,14 @@ class FaceBadgeSystem:
                 fps_counter += 1
                 
                 # Log FPS every 2 seconds
-                if time.time() - last_log_time > 2.0:
-                    elapsed = time.time() - fps_start_time
-                    current_fps = fps_counter / elapsed
+                current_time = time.time()
+                if current_time - last_log_time > 2.0:
+                    elapsed = current_time - fps_start_time
+                    current_fps = fps_counter / elapsed if elapsed > 0 else 0
                     logging.info(f"SCAN Animation FPS: {current_fps:.1f}")
                     fps_counter = 0
-                    fps_start_time = time.time()
-                    last_log_time = time.time()
+                    fps_start_time = current_time
+                    last_log_time = current_time
                 
                 # Check face recognition every N frames
                 if frame_counter % detect_every_n_frames == 0:
@@ -388,8 +406,11 @@ class FaceBadgeSystem:
                             time.sleep(scan_delay)
                         continue
                     
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    face_locations = face_recognition.face_locations(rgb_frame)
+                    # Resize for faster processing
+                    small_frame = cv2.resize(frame, (0, 0), fx=CAMERA_SCALE, fy=CAMERA_SCALE)
+                    rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+                    # Use faster HOG model instead of CNN
+                    face_locations = face_recognition.face_locations(rgb_frame, model=FACE_DETECTION_MODEL)
                     recognition_time = (time.time() - recognition_start) * 1000
                     
                     if not face_locations:
