@@ -11,6 +11,13 @@ import time
 import glob
 import logging
 import random
+import requests
+import base64
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add multiple possible paths for LCD library
 # Option 1: lib folder in same directory as this script
@@ -34,6 +41,16 @@ CAMERA_SCALE = 0.5              # Scale camera frames before detection (0.5 = ha
 FACE_DETECTION_MODEL = "hog"    # "hog" = fast but less accurate, "cnn" = slow but very accurate
 FRAMES_REQUIRED_FOR_MATCH = 3   # Consecutive frames needed to confirm face (stability)
 FACE_MATCH_TOLERANCE = 0.5      # Lower = stricter matching (0.6 default, 0.5 recommended, 0.4 very strict)
+
+# Google Sheets Integration (loaded from .env file)
+ENABLE_GOOGLE_SHEETS = os.getenv("ENABLE_GOOGLE_SHEETS", "True").lower() == "true"
+GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
+
+# Validate Google Sheets configuration
+if ENABLE_GOOGLE_SHEETS and not GOOGLE_APPS_SCRIPT_URL:
+    logging.warning("⚠️  ENABLE_GOOGLE_SHEETS is True but GOOGLE_APPS_SCRIPT_URL is not set in .env file!")
+    logging.warning("⚠️  Google Sheets logging will be disabled. Please create a .env file (see .env.example)")
+    ENABLE_GOOGLE_SHEETS = False
 # ============================================
 
 # Funny messages for unknown faces (randomly selected)
@@ -65,7 +82,11 @@ class FaceBadgeSystem:
         self.known_face_encodings = []
         self.known_face_names = []
         self.avatar_paths = {}
+        self.known_face_image_paths = {}  # Store original known face image paths
         self.load_known_faces()
+        
+        # Store latest camera frame for Google Sheets upload
+        self.latest_frame = None
         
         # Initialize camera ONCE here
         logging.info("Initializing camera...")
@@ -151,6 +172,9 @@ class FaceBadgeSystem:
                     self.known_face_encodings.append(encodings[0])
                     self.known_face_names.append(username)
                     
+                    # Store the original known face image path
+                    self.known_face_image_paths[username] = face_file
+                    
                     # Find matching avatar
                     avatar_path = self.find_avatar(username)
                     if avatar_path:
@@ -185,6 +209,92 @@ class FaceBadgeSystem:
                 return avatar_path
         
         return None
+    
+    def encode_image_to_base64(self, image_path):
+        """Encode image file to base64 string for Google Sheets upload"""
+        try:
+            with open(image_path, "rb") as f:
+                return base64.b64encode(f.read()).decode()
+        except Exception as e:
+            logging.error(f"Failed to encode image {image_path}: {e}")
+            return None
+    
+    def save_frame_to_temp(self, frame, username):
+        """Save current camera frame to temporary file and return path"""
+        try:
+            temp_dir = "temp_captures"
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            temp_path = os.path.join(temp_dir, f"{username}_{timestamp}.jpg")
+            
+            # Convert BGR to RGB
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb_frame)
+            pil_img.save(temp_path, "JPEG", quality=85)
+            
+            return temp_path
+        except Exception as e:
+            logging.error(f"Failed to save frame: {e}")
+            return None
+    
+    def upload_to_google_sheets(self, username, current_frame):
+        """Upload attendance data to Google Sheets"""
+        if not ENABLE_GOOGLE_SHEETS:
+            return
+        
+        try:
+            # Save current frame to temporary file
+            temp_frame_path = self.save_frame_to_temp(current_frame, username)
+            if not temp_frame_path:
+                logging.error("Failed to save current frame")
+                return
+            
+            # Get known face image path
+            known_face_path = self.known_face_image_paths.get(username)
+            if not known_face_path:
+                logging.error(f"No known face image found for {username}")
+                return
+            
+            # Encode both images to base64
+            current_image_b64 = self.encode_image_to_base64(temp_frame_path)
+            known_face_b64 = self.encode_image_to_base64(known_face_path)
+            
+            if not current_image_b64 or not known_face_b64:
+                logging.error("Failed to encode images")
+                return
+            
+            # Get current time in readable format
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Prepare data for Google Sheets
+            data = {
+                "name": username,
+                "time": current_time,
+                "user_current_image": current_image_b64,
+                "user_badge_image": known_face_b64  # This is the known_face image
+            }
+            
+            # Send to Google Apps Script
+            logging.info(f"Uploading attendance data for {username} to Google Sheets...")
+            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=10)
+            
+            if response.status_code == 200:
+                logging.info(f"✓ Successfully uploaded to Google Sheets: {username} at {current_time}")
+            else:
+                logging.error(f"✗ Failed to upload: HTTP {response.status_code}")
+            
+            # Clean up temporary file
+            try:
+                os.remove(temp_frame_path)
+            except:
+                pass
+                
+        except requests.exceptions.Timeout:
+            logging.error("Google Sheets upload timed out")
+        except Exception as e:
+            logging.error(f"Error uploading to Google Sheets: {e}")
     
     def fade_image(self, img, fade_in=True, steps=10, delay=0):
         """Fade in/out an image on the LCD display - NO DELAY for max speed"""
@@ -423,6 +533,9 @@ class FaceBadgeSystem:
                     detect_start = time.time()
                     ret, frame = self.cap.read()
                     if ret:
+                        # Store latest frame for potential Google Sheets upload
+                        self.latest_frame = frame.copy()
+                        
                         # Resize camera frame for faster processing
                         small_frame = cv2.resize(frame, (0, 0), fx=CAMERA_SCALE, fy=CAMERA_SCALE)
                         rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
@@ -473,6 +586,9 @@ class FaceBadgeSystem:
                         if scan_delay > 0:
                             time.sleep(scan_delay)
                         continue
+                    
+                    # Store latest frame for potential Google Sheets upload
+                    self.latest_frame = frame.copy()
                     
                     # Resize for faster processing
                     small_frame = cv2.resize(frame, (0, 0), fx=CAMERA_SCALE, fy=CAMERA_SCALE)
@@ -578,9 +694,17 @@ class FaceBadgeSystem:
             
             logging.info("Unknown face rejected with humor!")
         else:
-            # Known face - show normal badge
+            # Known face - show normal badge AND upload to Google Sheets
             # Get avatar path
             avatar_path = self.avatar_paths.get(username)
+            
+            # Upload to Google Sheets (in background, non-blocking)
+            if ENABLE_GOOGLE_SHEETS and self.latest_frame is not None:
+                try:
+                    # Upload in a try-except to not block the badge display
+                    self.upload_to_google_sheets(username, self.latest_frame)
+                except Exception as e:
+                    logging.error(f"Google Sheets upload failed: {e}")
             
             # Create badge screen
             badge_img = self.create_badge_screen(username, avatar_path)

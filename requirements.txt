@@ -2,5 +2,7 @@ opencv-python
 face-recognition
 Pillow
 numpy
+requests
+python-dotenv
 spidev
 RPi.GPIO

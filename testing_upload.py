@@ -1,7 +1,10 @@
 import requests
-import base64
+import base64, os
+from dotenv import load_dotenv
 
-url = "https://script.google.com/macros/s/AKfycbzlsGmuTD6rmSCctztx1nd8Ti1kYYV-7x7cr0j-TjxGEZhSfqk1k8N1D3KsjKIbruyCXw/exec"
+load_dotenv()
+
+url=os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
 
 def encode_image(path):
     with open(path, "rb") as f:
@@ -11,7 +14,7 @@ data = {
     "name": "Ahtesham",
     "time": 123,
     "user_current_image": encode_image("testing.png"),
-    "user_badge_image": encode_image("testing.png")
+    "user_badge_image": encode_image("skelton.jpg")
 }
 
 r = requests.post(url, json=data)
