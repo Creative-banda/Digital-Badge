@@ -94,6 +94,11 @@ class FaceBadgeSystem:
         # Store latest camera frame for Google Sheets upload
         self.latest_frame = None
         
+        # Login/Logout tracking
+        self.user_login_times = {}  # {username: datetime object}
+        self.user_login_status = {}  # {username: "logged_in" or "logged_out"}
+        self.login_timeout_hours = 1  # Hours before auto-logout
+        
         # Create backup directory for failed uploads
         if ENABLE_GOOGLE_SHEETS and not os.path.exists(BACKUP_DIR):
             os.makedirs(BACKUP_DIR)
@@ -250,7 +255,7 @@ class FaceBadgeSystem:
             logging.error(f"Failed to save frame: {e}")
             return None
     
-    def save_failed_upload(self, username, current_time, current_image_path, known_face_path, error_msg):
+    def save_failed_upload(self, username, current_time, current_image_path, known_face_path, error_msg, action="login"):
         """Save failed upload data locally for later retry"""
         try:
             # Create permanent backup directory structure
@@ -272,11 +277,12 @@ class FaceBadgeSystem:
             
             # Create entry for JSON
             failed_entry = {
+                "action": action,  # "login" or "logout"
                 "name": username,
                 "time": current_time,
                 "timestamp": datetime.now().isoformat(),
-                "current_image_path": backup_current_path,
-                "known_face_path": backup_known_path,
+                "current_image_path": backup_current_path if action == "login" else None,
+                "known_face_path": backup_known_path if action == "login" else None,
                 "error": error_msg,
                 "status": "pending"
             }
@@ -297,7 +303,7 @@ class FaceBadgeSystem:
             with open(BACKUP_JSON, 'w') as f:
                 json.dump(failed_uploads, f, indent=2)
             
-            logging.info(f"💾 Saved failed upload locally: {username} at {current_time}")
+            logging.info(f"💾 Saved failed upload locally: {username} at {current_time} (action: {action})")
             logging.info(f"📁 Backup location: {BACKUP_DIR}")
             
         except Exception as e:
@@ -308,80 +314,151 @@ class FaceBadgeSystem:
         if not ENABLE_GOOGLE_SHEETS:
             return
         
-        # Start upload in background thread - completely non-blocking!
+        current_time = datetime.now()
+        user_status = self.user_login_status.get(username, None)
+        action = None
+        
+        # Determine what action to take
+        if user_status == "logged_out":
+            # User already logged out - don't send any request
+            logging.info(f"ℹ️  {username} is already logged out - no request sent")
+            return
+        
+        elif user_status == "logged_in":
+            # User is logged in - check if timeout reached
+            last_login = self.user_login_times[username]
+            time_diff = current_time - last_login
+            hours_diff = time_diff.total_seconds() / 3600
+            
+            if hours_diff >= self.login_timeout_hours:
+                # Time to logout
+                action = "logout"
+                self.user_login_status[username] = "logged_out"
+                logging.info(f"⏱️  {username} last login was {hours_diff:.1f}h ago - triggering LOGOUT")
+            else:
+                # Still within timeout - just show badge, no request
+                logging.info(f"ℹ️  {username} already logged in ({hours_diff*60:.0f}min ago) - no request sent")
+                return
+        
+        else:
+            # First time or no status - LOGIN
+            action = "login"
+            self.user_login_times[username] = current_time
+            self.user_login_status[username] = "logged_in"
+            logging.info(f"🆕 First detection for {username} - triggering LOGIN")
+        
+        # Start upload in background thread
         upload_thread = threading.Thread(
             target=self._upload_worker,
-            args=(username, current_frame.copy()),  # Copy frame to avoid race conditions
-            daemon=True  # Daemon thread won't block program exit
+            args=(username, current_frame.copy(), action),
+            daemon=True
         )
         upload_thread.start()
-        logging.info(f"📤 Started background upload for {username}")
+        logging.info(f"📤 Started background upload for {username} (action: {action})")
     
-    def _upload_worker(self, username, current_frame):
+    def _upload_worker(self, username, current_frame, action="login"):
         """Background worker thread for Google Sheets upload"""
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        current_timestamp_iso = datetime.now().isoformat()
         temp_frame_path = None
         known_face_path = None
         
         try:
-            # Save current frame to temporary file
-            temp_frame_path = self.save_frame_to_temp(current_frame, username)
-            if not temp_frame_path:
-                logging.error("Failed to save current frame")
-                return
-            
-            # Get known face image path
-            known_face_path = self.known_face_image_paths.get(username)
-            if not known_face_path:
-                logging.error(f"No known face image found for {username}")
-                return
-            
-            # Encode both images to base64
-            current_image_b64 = self.encode_image_to_base64(temp_frame_path)
-            known_face_b64 = self.encode_image_to_base64(known_face_path)
-            
-            if not current_image_b64 or not known_face_b64:
-                logging.error("Failed to encode images")
-                return
-            
-            # Prepare data for Google Sheets
-            data = {
-                "name": username,
-                "time": current_time,
-                "user_current_image": current_image_b64,
-                "user_badge_image": known_face_b64  # This is the known_face image
-            }
-            
-            # Send to Google Apps Script
-            logging.info(f"🔄 Uploading attendance data for {username} to Google Sheets...")
-            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                logging.info(f"✅ Successfully uploaded to Google Sheets: {username} at {current_time}")
-                # Clean up temporary file on success
-                try:
-                    os.remove(temp_frame_path)
-                except:
-                    pass
-            else:
-                error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
-                logging.error(f"❌ Failed to upload: {error_msg}")
-                # Save failed upload locally
-                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
+            if action == "logout":
+                # Send LOGOUT only (no images needed)
+                self._send_logout(username, current_timestamp_iso)
                 
+            elif action == "login":
+                # Send LOGIN with images
+                # Save current frame to temporary file
+                temp_frame_path = self.save_frame_to_temp(current_frame, username)
+                if not temp_frame_path:
+                    logging.error("Failed to save current frame")
+                    return
+                
+                # Get known face image path
+                known_face_path = self.known_face_image_paths.get(username)
+                if not known_face_path:
+                    logging.error(f"No known face image found for {username}")
+                    return
+                
+                # Encode both images to base64 with data URI prefix
+                current_image_b64 = self._encode_image_with_prefix(temp_frame_path)
+                known_face_b64 = self._encode_image_with_prefix(known_face_path)
+                
+                if not current_image_b64 or not known_face_b64:
+                    logging.error("Failed to encode images")
+                    return
+                
+                # Prepare data for Google Sheets (LOGIN)
+                data = {
+                    "action": "login",
+                    "name": username,
+                    "time": current_timestamp_iso,
+                    "user_current_image": current_image_b64,
+                    "user_badge_image": known_face_b64
+                }
+                
+                # Send to Google Apps Script
+                logging.info(f"🔄 Uploading LOGIN for {username} to Google Sheets...")
+                response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
+                
+                if response.status_code == 200:
+                    logging.info(f"✅ Successfully uploaded LOGIN: {username} at {current_time}")
+                    # Clean up temporary file on success
+                    try:
+                        os.remove(temp_frame_path)
+                    except:
+                        pass
+                else:
+                    error_msg = f"HTTP {response.status_code}: {response.text[:100]}"
+                    logging.error(f"❌ Failed to upload: {error_msg}")
+                    # Save failed upload locally
+                    self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg, action)
+                    
         except requests.exceptions.Timeout:
             error_msg = "Request timeout (30s)"
             logging.error(f"⏱️  Google Sheets upload timed out (background thread)")
             # Save failed upload locally
-            if temp_frame_path and known_face_path:
-                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
+            if action == "login" and temp_frame_path and known_face_path:
+                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg, action)
                 
         except Exception as e:
             error_msg = str(e)
             logging.error(f"❌ Error uploading to Google Sheets (background thread): {e}")
             # Save failed upload locally
-            if temp_frame_path and known_face_path:
-                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg)
+            if action == "login" and temp_frame_path and known_face_path:
+                self.save_failed_upload(username, current_time, temp_frame_path, known_face_path, error_msg, action)
+    
+    def _send_logout(self, username, timestamp_iso):
+        """Send logout action to Google Sheets"""
+        try:
+            data = {
+                "action": "logout",
+                "name": username,
+                "time": timestamp_iso
+            }
+            
+            logging.info(f"🔄 Sending LOGOUT for {username} to Google Sheets...")
+            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
+            
+            if response.status_code == 200:
+                logging.info(f"✅ Successfully sent LOGOUT: {username}")
+            else:
+                logging.error(f"❌ Failed to send LOGOUT: HTTP {response.status_code}")
+                
+        except Exception as e:
+            logging.error(f"❌ Error sending LOGOUT: {e}")
+    
+    def _encode_image_with_prefix(self, image_path):
+        """Encode image to base64 with data URI prefix"""
+        try:
+            with open(image_path, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode()
+                return f"data:image/jpeg;base64,{encoded}"
+        except Exception as e:
+            logging.error(f"Failed to encode image {image_path}: {e}")
+            return None
     
     def fade_image(self, img, fade_in=True, steps=10, delay=0):
         """Fade in/out an image on the LCD display - NO DELAY for max speed"""
@@ -422,7 +499,7 @@ class FaceBadgeSystem:
         
         return img
     
-    def create_badge_screen(self, username, avatar_path=None):
+    def create_badge_screen(self, username, avatar_path=None, message="Welcome!"):
         """Create badge screen with avatar and name"""
         img = Image.new("RGB", (LCD_SIZE, LCD_SIZE), (0, 0, 0))
         draw = ImageDraw.Draw(img)
@@ -491,7 +568,7 @@ class FaceBadgeSystem:
         tw = bbox[2] - bbox[0]
         draw.text(((LCD_SIZE - tw) // 2, 185), display_name, fill=(255, 255, 255), font=name_font)
         
-        # Draw "Welcome" text
+        # Draw "Welcome" text (or custom message)
         try:
             welcome_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -500,10 +577,9 @@ class FaceBadgeSystem:
         except:
             welcome_font = ImageFont.load_default()
         
-        welcome_text = "Welcome!"
-        bbox = draw.textbbox((0, 0), welcome_text, font=welcome_font)
+        bbox = draw.textbbox((0, 0), message, font=welcome_font)
         tw = bbox[2] - bbox[0]
-        draw.text(((LCD_SIZE - tw) // 2, 210), welcome_text, fill=(100, 255, 100), font=welcome_font)
+        draw.text(((LCD_SIZE - tw) // 2, 210), message, fill=(100, 255, 100), font=welcome_font)
         
         return img
     
@@ -762,7 +838,29 @@ class FaceBadgeSystem:
         """Display user badge with animation"""
         self.current_state = "badge"
         
-        logging.info(f"Showing badge for: {username}")
+        # Check user status
+        user_status = self.user_login_status.get(username, None)
+        badge_message = "Welcome!"
+        
+        if user_status == "logged_out":
+            badge_message = "Logged out!\nSee you later! 👋"
+            logging.info(f"Showing badge for: {username} (LOGGED OUT - no request)")
+        elif user_status == "logged_in":
+            # Check if it's time to logout
+            last_login = self.user_login_times.get(username)
+            if last_login:
+                time_diff = datetime.now() - last_login
+                hours_diff = time_diff.total_seconds() / 3600
+                
+                if hours_diff >= self.login_timeout_hours:
+                    badge_message = "Logging out...\nSee you soon! 👋"
+                    logging.info(f"Showing badge for: {username} (LOGOUT TRIGGERED)")
+                else:
+                    logging.info(f"Showing badge for: {username} (ALREADY LOGGED IN - no request)")
+            else:
+                logging.info(f"Showing badge for: {username} (LOGGED IN)")
+        else:
+            logging.info(f"Showing badge for: {username} (NEW LOGIN)")
         
         # Check if unknown face
         if username == "UNKNOWN":
@@ -790,8 +888,8 @@ class FaceBadgeSystem:
                 self.upload_to_google_sheets(username, self.latest_frame)
             
             # Badge display continues immediately without waiting for upload!
-            # Create badge screen
-            badge_img = self.create_badge_screen(username, avatar_path)
+            # Create badge screen (with appropriate message)
+            badge_img = self.create_badge_screen(username, avatar_path, message=badge_message)
             
             # Fade in badge (no delay)
             self.fade_image(badge_img, fade_in=True, steps=10, delay=0)

@@ -23,10 +23,11 @@ BACKUP_JSON = "failed_uploads/pending_uploads.json"
 GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
 
 def encode_image_to_base64(image_path):
-    """Encode image file to base64 string"""
+    """Encode image file to base64 string with data URI prefix"""
     try:
         with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
+            encoded = base64.b64encode(f.read()).decode()
+            return f"data:image/jpeg;base64,{encoded}"
     except Exception as e:
         print(f"Failed to encode {image_path}: {e}")
         return None
@@ -60,46 +61,69 @@ def retry_failed_uploads():
         if entry.get("status") != "pending":
             continue
         
-        print(f"\n[{idx + 1}/{len(failed_uploads)}] Retrying: {entry['name']} at {entry['time']}")
+        action = entry.get("action", "login")  # Default to login for old entries
+        print(f"\n[{idx + 1}/{len(failed_uploads)}] Retrying: {entry['name']} at {entry['time']} (action: {action})")
         
         try:
-            # Encode images
-            current_image_b64 = encode_image_to_base64(entry['current_image_path'])
-            known_face_b64 = encode_image_to_base64(entry['known_face_path'])
-            
-            if not current_image_b64 or not known_face_b64:
-                print("  ❌ Failed to encode images")
-                still_failed.append(entry)
-                continue
-            
-            # Prepare data
-            data = {
-                "name": entry['name'],
-                "time": entry['time'],
-                "user_current_image": current_image_b64,
-                "user_badge_image": known_face_b64
-            }
-            
-            # Send to Google Sheets
-            print(f"  🔄 Uploading...")
-            response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                print(f"  ✅ Success!")
-                entry['status'] = 'uploaded'
-                entry['uploaded_at'] = datetime.now().isoformat()
-                successful_uploads.append(entry)
+            if action == "logout":
+                # Send logout (no images needed)
+                print(f"  🔄 Sending LOGOUT...")
+                logout_data = {
+                    "action": "logout",
+                    "name": entry['name'],
+                    "time": entry.get('timestamp', entry['time'])
+                }
+                response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=logout_data, timeout=30)
                 
-                # Clean up images
-                try:
-                    os.remove(entry['current_image_path'])
-                    os.remove(entry['known_face_path'])
-                    print(f"  🗑️  Cleaned up backup images")
-                except:
-                    pass
-            else:
-                print(f"  ❌ Failed: HTTP {response.status_code}")
-                still_failed.append(entry)
+                if response.status_code == 200:
+                    print(f"  ✅ LOGOUT successful!")
+                    entry['status'] = 'uploaded'
+                    entry['uploaded_at'] = datetime.now().isoformat()
+                    successful_uploads.append(entry)
+                else:
+                    print(f"  ❌ Failed: HTTP {response.status_code}")
+                    still_failed.append(entry)
+                    
+            elif action == "login":
+                # Send login with images
+                # Encode images
+                current_image_b64 = encode_image_to_base64(entry['current_image_path'])
+                known_face_b64 = encode_image_to_base64(entry['known_face_path'])
+                
+                if not current_image_b64 or not known_face_b64:
+                    print("  ❌ Failed to encode images")
+                    still_failed.append(entry)
+                    continue
+                
+                # Prepare data
+                data = {
+                    "action": "login",
+                    "name": entry['name'],
+                    "time": entry.get('timestamp', entry['time']),
+                    "user_current_image": current_image_b64,
+                    "user_badge_image": known_face_b64
+                }
+                
+                # Send to Google Sheets
+                print(f"  🔄 Uploading LOGIN...")
+                response = requests.post(GOOGLE_APPS_SCRIPT_URL, json=data, timeout=30)
+                
+                if response.status_code == 200:
+                    print(f"  ✅ LOGIN successful!")
+                    entry['status'] = 'uploaded'
+                    entry['uploaded_at'] = datetime.now().isoformat()
+                    successful_uploads.append(entry)
+                    
+                    # Clean up images
+                    try:
+                        os.remove(entry['current_image_path'])
+                        os.remove(entry['known_face_path'])
+                        print(f"  🗑️  Cleaned up backup images")
+                    except:
+                        pass
+                else:
+                    print(f"  ❌ Failed: HTTP {response.status_code}")
+                    still_failed.append(entry)
                 
         except Exception as e:
             print(f"  ❌ Error: {e}")
