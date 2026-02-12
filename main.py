@@ -51,6 +51,7 @@ GOOGLE_APPS_SCRIPT_URL = os.getenv("GOOGLE_APPS_SCRIPT_URL", "")
 # Backup/Fallback Configuration
 BACKUP_DIR = "failed_uploads"   # Directory to store failed uploads
 BACKUP_JSON = "failed_uploads/pending_uploads.json"  # JSON file tracking failed uploads
+USER_STATE_JSON = "user_login_state.json"  # Persistent storage for user login/logout state
 
 # Validate Google Sheets configuration
 if ENABLE_GOOGLE_SHEETS and not GOOGLE_APPS_SCRIPT_URL:
@@ -98,6 +99,9 @@ class FaceBadgeSystem:
         self.user_login_times = {}  # {username: datetime object}
         self.user_login_status = {}  # {username: "logged_in" or "logged_out"}
         self.login_timeout_hours = 1  # Hours before auto-logout
+        
+        # Load persistent user state from JSON
+        self.load_user_state()
         
         # Create backup directory for failed uploads
         if ENABLE_GOOGLE_SHEETS and not os.path.exists(BACKUP_DIR):
@@ -225,6 +229,65 @@ class FaceBadgeSystem:
                 return avatar_path
         
         return None
+    
+    def load_user_state(self):
+        """Load user login/logout state from JSON file"""
+        if not os.path.exists(USER_STATE_JSON):
+            logging.info("No existing user state found - starting fresh")
+            return
+        
+        try:
+            with open(USER_STATE_JSON, 'r') as f:
+                state_data = json.load(f)
+            
+            # Restore user statuses
+            self.user_login_status = state_data.get("user_login_status", {})
+            
+            # Restore login times (convert ISO strings back to datetime)
+            login_times_str = state_data.get("user_login_times", {})
+            for username, time_str in login_times_str.items():
+                try:
+                    self.user_login_times[username] = datetime.fromisoformat(time_str)
+                except:
+                    pass
+            
+            logging.info(f"✅ Loaded user state: {len(self.user_login_status)} user(s) tracked")
+            
+            # Log current states
+            for username, status in self.user_login_status.items():
+                if status == "logged_in":
+                    login_time = self.user_login_times.get(username)
+                    if login_time:
+                        time_str = login_time.strftime("%Y-%m-%d %H:%M:%S")
+                        logging.info(f"  • {username}: logged_in (since {time_str})")
+                elif status == "logged_out":
+                    logging.info(f"  • {username}: logged_out")
+                    
+        except Exception as e:
+            logging.error(f"Failed to load user state: {e}")
+            logging.info("Starting with fresh state")
+    
+    def save_user_state(self):
+        """Save user login/logout state to JSON file"""
+        try:
+            # Convert datetime objects to ISO strings for JSON serialization
+            login_times_str = {}
+            for username, dt in self.user_login_times.items():
+                login_times_str[username] = dt.isoformat()
+            
+            state_data = {
+                "user_login_status": self.user_login_status,
+                "user_login_times": login_times_str,
+                "last_updated": datetime.now().isoformat()
+            }
+            
+            with open(USER_STATE_JSON, 'w') as f:
+                json.dump(state_data, f, indent=2)
+            
+            logging.debug("User state saved to disk")
+            
+        except Exception as e:
+            logging.error(f"Failed to save user state: {e}")
     
     def encode_image_to_base64(self, image_path):
         """Encode image file to base64 string for Google Sheets upload"""
@@ -355,6 +418,9 @@ class FaceBadgeSystem:
         )
         upload_thread.start()
         logging.info(f"📤 Started background upload for {username} (action: {action})")
+        
+        # Save state to disk after any status change
+        self.save_user_state()
     
     def _upload_worker(self, username, current_frame, action="login"):
         """Background worker thread for Google Sheets upload"""
@@ -916,6 +982,9 @@ class FaceBadgeSystem:
         """Clean up resources"""
         logging.info("Cleaning up resources...")
         self.running = False
+        
+        # Save final user state before exit
+        self.save_user_state()
         
         if self.cap:
             self.cap.release()

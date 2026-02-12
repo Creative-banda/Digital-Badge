@@ -19,6 +19,7 @@ env/
 # Temporary files
 temp_captures/
 failed_uploads/
+user_login_state.json
 *.log
 
 # OS files
